@@ -16,7 +16,7 @@ def ppTacticState : List MVarId → MetaM String
   | [] => return "no goals"
   | [g] => return (← Meta.ppGoal g).pretty
   | goals =>
-      return (← goals.foldlM (init := "") (fun a b => do return s!"{a}\n\n{(← Meta.ppGoal b).pretty}")).trim
+      return (← goals.foldlM (init := "") (fun a b => do return s!"{a}\n\n{(← Meta.ppGoal b).pretty}")).trimAscii.toString
 
 
 /--
@@ -49,7 +49,7 @@ elab_rules : tactic
   | `(tactic | suggest_tactics_deepseek%$tac $pfx:str) => do
     let tacticsWithScores ← suggestTactics "deepseek" pfx.getString
     let tactics := tacticsWithScores.map (·.1)
-    let range : String.Range := { start := tac.getRange?.get!.start, stop := pfx.raw.getRange?.get!.stop }
+    let range : Lean.Syntax.Range := { start := tac.getRange?.get!.start, stop := pfx.raw.getRange?.get!.stop }
     let ref := Syntax.ofRange range
     hint ref tactics True
 

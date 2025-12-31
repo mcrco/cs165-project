@@ -74,15 +74,15 @@ def ExternalGenerator.generate (model : ExternalGenerator) (input : String) (tar
   return res.outputs.map fun g => (g.output, g.score)
 
 
-def generateRunpod (input : String) (modelName : String) (targetPrefix : String) : IO $ Array (String × Float) := do
+def generateRunpod (input : String) (modelName : String) (_targetPrefix : String) : IO $ Array (String × Float) := do
   let url := "https://router.huggingface.co/v1/chat/completions"
-  
+
   -- Format the prompt (same as Python pre_process_input)
   let prompt := if modelName == "deepseek" then
     s!"Here is a theorem you need to prove in Lean:```lean\n{input}```\nNow you should suggest exactly one line tactic in lean code. Only output the tactic, no explanation, no comments, no theorem, nothing else:"
   else
     input
-  
+
   -- Build JSON payload
   let message := Json.mkObj [("role", Json.str "user"), ("content", Json.str prompt)]
   let messages := Json.arr #[message]
@@ -95,7 +95,7 @@ def generateRunpod (input : String) (modelName : String) (targetPrefix : String)
     ("n", Json.num 4)
   ]
   let reqStr := reqJson.pretty 99999999999999999
-  
+
   -- Read HF_TOKEN from .env file in current directory
   let envFile := ".env"
   let envContent ← IO.FS.readFile envFile
@@ -103,10 +103,10 @@ def generateRunpod (input : String) (modelName : String) (targetPrefix : String)
   let mut token := ""
   for line in lines do
     if line.startsWith "HF_TOKEN=" then
-      token := line.drop 9  -- Remove "HF_TOKEN=" prefix
+      token := (line.drop 9).toString  -- Remove "HF_TOKEN=" prefix
   if token == "" then
     throw $ IO.userError "HF_TOKEN not found in .env file. Please create a .env file with: HF_TOKEN=your_token_here"
-  
+
   -- Make API call
   let out ← IO.Process.output {
     cmd := "curl"
@@ -114,19 +114,19 @@ def generateRunpod (input : String) (modelName : String) (targetPrefix : String)
   }
   if out.exitCode != 0 then
      throw $ IO.userError s!"Request failed. Please check if the API is accessible at `{url}`."
-  
+
   -- Parse response
   let some json := Json.parse out.stdout |>.toOption
     | throw $ IO.userError "Failed to parse response"
-  
+
   -- Debug: print raw response
   IO.println s!"Raw API response: {out.stdout}"
-  
+
   let some choices := json.getObjVal? "choices" |>.toOption
     | throw $ IO.userError "No choices in response"
   let some choicesArray := choices.getArr? |>.toOption
     | throw $ IO.userError "Choices is not an array"
-  
+
   -- Extract and clean responses (same as Python post_process_output)
   let mut results : Array (String × Float) := #[]
   for choice in choicesArray do
@@ -140,19 +140,19 @@ def generateRunpod (input : String) (modelName : String) (targetPrefix : String)
     let cleaned := if modelName == "deepseek" then
       -- Extract content between backticks
       if contentStr.startsWith "`" && contentStr.endsWith "`" then
-        contentStr.drop 1 |>.dropRight 1  -- Remove first and last backtick
+        contentStr.drop 1 |>.dropEnd 1  -- Remove first and last backtick
       else
         contentStr
     else
       contentStr
-    results := results.push (cleaned, 1.0)
-  
+    results := results.push (cleaned.toString, 1.0)
+
   -- Deduplicate (same as Python choices_dedup)
   let mut uniqueData : List (String × Float) := []
   for result in results do
     if !uniqueData.any (·.1 == result.1) then
       uniqueData := uniqueData.append [result]
-  
+
   return uniqueData.toArray
 
 
