@@ -8,12 +8,14 @@ This package provides different types of theorem proving agents:
 """
 
 from .base_agent import BaseAgent
+from .diffusion_agent import DiffusionAgent
 from .external_agent import ExternalAgent
 from .hf_agent import HFAgent
 from .lean_agent import LeanAgent
 
 __all__ = [
     "BaseAgent",
+    "DiffusionAgent",
     "HFAgent",
     "LeanAgent",
     "ExternalAgent",

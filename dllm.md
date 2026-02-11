@@ -115,6 +115,24 @@ Deliverable: a short design note (in this file or a separate doc) stating the ex
     - optional xFormers / SDPA depending on your denoiser architecture
   - **[Update `pyproject.toml`](pyproject.toml)** to add any new dependencies.
 
+#### Phase 0 — Design Note (completed)
+
+> **Algorithm**: Discrete masked diffusion (absorbing-state), as implemented by the LLaDA family of models.
+>
+> **Pivot model**: [`inclusionAI/LLaDA-MoE-7B-A1B-Instruct`](https://huggingface.co/inclusionAI/LLaDA-MoE-7B-A1B-Instruct) — 7.03B total params, 1.4B active (MoE), 4096 context, vocabulary 157184, mask token id `156895`.
+>
+> **Training loss**: Masked denoising objective — corrupt target tokens to mask id, train the model to predict original tokens at all masked positions simultaneously (cross-entropy over masked positions). This is the standard LLaDA pre-training/fine-tuning loss.
+>
+> **Inference / sampling schedule**:
+> - Semi-autoregressive block-based generation: output is divided into blocks of `block_length` tokens; each block is denoised in `steps_per_block` iterations.
+> - At each iteration: run full forward pass → apply Gumbel noise (temperature-controlled) → argmax → rank candidates by confidence (softmax probability at predicted token) → unmask the top-k most confident tokens (k = remaining_masks / remaining_steps).
+> - Remasking strategy: `low_confidence` (default) keeps high-confidence predictions, remasks low-confidence ones; `random` remasks randomly.
+> - Classifier-free guidance (optional): `cfg_scale > 0` interpolates between conditional and unconditional logits.
+>
+> **Defaults**: `steps=128`, `gen_length=128`, `block_length=32`, `temperature=0.0` (greedy), `cfg_scale=0.0` (no guidance), `remasking=low_confidence`.
+>
+> **Implementation**: `lean_dojo_v2/diffusion/` package with `DiffusionConfig` (dataclass) and `DiffusionSampler` (model loading + generate loop). Integrated via `DiffusionProver` (subclass of `BaseProver`) and `DiffusionAgent` (subclass of `BaseAgent`).
+
 ---
 
 ### Phase 1 — Next-tactic diffusion inference integrated into proof search (highest priority)
