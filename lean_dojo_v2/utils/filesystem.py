@@ -130,8 +130,10 @@ def working_directory(
     finally:
         os.chdir(origin)
         if is_temporary:
-            tmp_dir.__exit__(None, None, None)
-
+            try:
+                tmp_dir.__exit__(None, None, None)
+            except OSError as _:
+                pass
 
 def compute_md5(path: Path) -> str:
     """Return the MD5 hash of the file ``path``."""

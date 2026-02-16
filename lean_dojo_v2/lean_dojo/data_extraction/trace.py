@@ -10,6 +10,7 @@ import shutil
 from contextlib import contextmanager
 from multiprocessing import Process
 from pathlib import Path
+from subprocess import CalledProcessError
 from time import monotonic, sleep
 from typing import Generator, List, Optional, Union
 
@@ -150,6 +151,11 @@ def _trace(repo: LeanGitRepo, build_deps: bool) -> None:
 
     with working_directory(repo.name):
         # Build the repo using lake.
+        if not build_deps:
+            try:
+                execute("lake exe cache get")
+            except CalledProcessError:
+                pass
         execute("lake build")
 
         # Copy the Lean 4 stdlib into the path of packages.
