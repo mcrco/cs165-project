@@ -42,7 +42,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--ckpt-path",
         type=str,
-        required=True,
+        default="inclusionAI/LLaDA-MoE-7B-A1B-Instruct",
         help="Diffusion model checkpoint path or HF model id.",
     )
     parser.add_argument(

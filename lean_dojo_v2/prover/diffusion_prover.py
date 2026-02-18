@@ -216,7 +216,7 @@ def _generate(
     assert steps % num_blocks == 0
     steps = steps // num_blocks
 
-    # Since this is from LLaDA 2.0, which does block diffusion, we loop over
+    # Since this is from LLaDA MoE, which does block diffusion, we loop over
     # blocks. However, to leverage bidirectionality, intuitively we should keep
     # the entire generation to one block.
     for num_block in range(num_blocks):
