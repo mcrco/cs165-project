@@ -2,7 +2,7 @@ from typing import Optional
 
 from lean_dojo_v2.lean_agent.config import ProverConfig, TrainingConfig
 from lean_dojo_v2.prover import DiffusionProver
-from lean_dojo_v2.trainer import SFTTrainer
+from lean_dojo_v2.trainer import DiffusionSFTTrainer
 
 from .base_agent import BaseAgent
 
@@ -10,7 +10,7 @@ from .base_agent import BaseAgent
 class DiffusionAgent(BaseAgent):
     def __init__(
         self,
-        trainer: Optional[SFTTrainer] = None,
+        trainer: Optional[DiffusionSFTTrainer] = None,
         database_path: str = "dynamic_database.json",
         training_config: Optional[TrainingConfig] = None,
         prover_config: Optional[ProverConfig] = None,
@@ -19,6 +19,7 @@ class DiffusionAgent(BaseAgent):
         self.config = training_config or TrainingConfig()
         self.prover_config = prover_config or ProverConfig()
         self.trainer = trainer
+        self.use_lora = False
         if self.trainer:
             self.output_dir = self.trainer.output_dir
             self.use_lora = self.trainer.lora_config is not None
