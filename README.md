@@ -182,7 +182,7 @@ database.trace_repository(
 )
 ```
 
-The generated artifacts flow into the `DynamicDatabase`, which keeps repositories sorted by difficulty and appends new sorrys without retracing everything.
+The `build_deps` options decides whether LeanDojo will extract the premises from the repository's external dependencies, it is set to `False` by default. However, if you are using the traced data to train LeanAgent, it must be set to `True`.  The generated artifacts flow into the `DynamicDatabase`, which keeps repositories sorted by difficulty and appends new sorrys without retracing everything.
 
 ## Working with Agents and Trainers
 
