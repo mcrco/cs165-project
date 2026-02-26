@@ -12,3 +12,5 @@ export PATH="/root/.elan/bin:$PATH"
 
 echo "elan version:"
 elan --version
+
+uv pip install git+https://github.com/stanford-centaur/PyPantograph
