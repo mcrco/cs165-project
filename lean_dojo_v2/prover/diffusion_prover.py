@@ -28,8 +28,17 @@ class DiffusionProver(BaseProver):
         else:
             self.device = torch.device(device)
 
-        self.tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
-        self.model = AutoModelForCausalLM.from_pretrained(ckpt_path).to(self.device)
+        # Reduce host RAM pressure during model load on HPC nodes.
+        model_dtype = torch.bfloat16 if self.device.type == "cuda" else torch.float32
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            ckpt_path, trust_remote_code=True
+        )
+        self.model = AutoModelForCausalLM.from_pretrained(
+            ckpt_path,
+            trust_remote_code=True,
+            low_cpu_mem_usage=True,
+            torch_dtype=model_dtype,
+        ).to(self.device)
         self.mask_token_id = self.tokenizer.convert_tokens_to_ids("<|mdm_mask|>")
         if self.mask_token_id is None or self.mask_token_id < 0:
             # LLaDA mask token id (https://huggingface.co/inclusionAI/LLaDA-MoE-7B-A1B-Instruct)

@@ -30,7 +30,13 @@ class DiffusionAgent(BaseAgent):
 
     def _setup_prover(self):
         """Set up the DiffusionProver for DiffusionAgent."""
-        self.prover = DiffusionProver(ckpt_path=self.output_dir, use_lora=self.use_lora)
+        if self.trainer:
+            self.prover = DiffusionProver(
+                ckpt_path=self.output_dir, use_lora=self.use_lora
+            )
+        else:
+            # Use DiffusionProver's default base model when no fine-tuned ckpt is given.
+            self.prover = DiffusionProver()
 
 
 def main():
@@ -38,7 +44,7 @@ def main():
     Main function to run DiffusionAgent.
     """
     url = "https://github.com/durant42040/lean4-example"
-    commit = "005de00d03f1aaa32cb2923d5e3cbaf0b954a192"
+    commit = "b14fef0ceca29a65bc3122bf730406b33c7effe5"
 
     agent = DiffusionAgent()
     agent.setup_github_repository(url=url, commit=commit)

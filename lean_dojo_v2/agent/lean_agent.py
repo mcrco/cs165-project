@@ -41,7 +41,8 @@ def main():
     Main function to run LeanAgent.
     """
     url = "https://github.com/durant42040/lean4-example"
-    commit = "005de00d03f1aaa32cb2923d5e3cbaf0b954a192"
+    # Use an older commit whose toolchain aligns with LeanDojo-v2 tracing.
+    commit = "3f8c5eb303a225cdef609498b8d87262e5ef344b"
 
     agent = LeanAgent()
     agent.setup_github_repository(url=url, commit=commit)

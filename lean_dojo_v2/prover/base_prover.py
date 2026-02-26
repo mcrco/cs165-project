@@ -50,6 +50,18 @@ class BaseProver(Agent, ABC):
             priorities.append(priority)
         return priorities
 
+    @staticmethod
+    def _compact(text: str, max_len: int = 220) -> str:
+        """Compress multiline debug strings into one readable line."""
+        one_line = " ".join(text.split())
+        if len(one_line) <= max_len:
+            return one_line
+        return one_line[: max_len - 3] + "..."
+
+    @classmethod
+    def _format_goal(cls, goal_obj) -> str:
+        return cls._compact(str(goal_obj), max_len=180)
+
     def search(
         self,
         server: Server,
@@ -104,7 +116,7 @@ class BaseProver(Agent, ABC):
             assert search_stack, "No states in search stack"
 
             if verbose:
-                print(f"I={i_step}: len(S) = {len(search_stack)}")
+                print(f"[step {i_step:02d}] stack={len(search_stack)}")
             search_state = search_stack[-1]
             current_node_id = len(search_stack) - 1
 
@@ -120,6 +132,11 @@ class BaseProver(Agent, ABC):
                     success=True,
                     steps=i_step,
                 )
+                if verbose:
+                    print(
+                        f"[search end] solved in {i_step} steps "
+                        f"({result.duration:.2f}s)"
+                    )
 
                 # Find shortest path to solved state
                 shortest_path = self._find_shortest_path_to_solved(
@@ -139,7 +156,7 @@ class BaseProver(Agent, ABC):
                 tactic = self.next_tactic(search_state.goal_state, goal_id)
 
             if verbose:
-                print(f"Next tactic: {tactic}")
+                print(f"  propose: {tactic!s}")
             if not tactic:
                 # resets the feedback
                 search_state.tactic_feedback = None
@@ -147,7 +164,7 @@ class BaseProver(Agent, ABC):
                 search_stack.pop(-1)
                 if not search_stack:
                     if verbose:
-                        print("Search stack has been exhausted")
+                        print("[search end] stack exhausted (no proof found)")
                     self.reset()
                     result = SearchResult(
                         n_goals_root=n_goals_root,
@@ -163,11 +180,17 @@ class BaseProver(Agent, ABC):
                 goal_state = search_state.goal_state
                 if verbose:
                     print(
-                        f"{goal_state.state_id}.{goal_id}: {tactic} on {goal_state.goals[goal_id]}"
+                        f"  apply: state={goal_state.state_id} goal={goal_id} tactic={tactic}"
                     )
+                    print(f"  goal : {self._format_goal(goal_state.goals[goal_id])}")
                 next_goal_state = server.goal_tactic(
                     goal_state, tactic, site=Site(goal_id, auto_resume=False)
                 )
+                if verbose:
+                    print(
+                        f"  ok   : advanced to {len(next_goal_state.goals)} "
+                        f"remaining goal(s)"
+                    )
                 # Generate priorities for the next goal state
                 priorities = (
                     [0.0 for _ in next_goal_state.goals]
@@ -197,7 +220,7 @@ class BaseProver(Agent, ABC):
 
             except TacticFailure as t:
                 if verbose:
-                    print(f"Tactic failed: {t}")
+                    print(f"  fail : {self._compact(str(t), max_len=260)}")
                 search_state.tactic_feedback = str(t)
                 # Add failed tactic as edge to a failure node
                 failure_node_id = f"failure_{current_node_id}_{goal_id}_{search_state.trials[goal_id]}"
@@ -217,7 +240,7 @@ class BaseProver(Agent, ABC):
                 raise RuntimeError(f"While executing tactic: {tactic}") from e
 
         if verbose:
-            print("Search iteration limit exhausted")
+            print("[search end] iteration limit exhausted")
 
         self.reset()
         result = SearchResult(

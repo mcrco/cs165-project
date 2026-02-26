@@ -1,6 +1,10 @@
 import os
+import subprocess
 from abc import ABC, abstractmethod
+from contextlib import redirect_stdout
+from datetime import datetime
 from pathlib import Path
+import sys
 
 from loguru import logger
 from pantograph import Server
@@ -10,6 +14,22 @@ from lean_dojo_v2.database.models import Repository
 from lean_dojo_v2.lean_dojo.data_extraction.lean import LeanGitRepo
 from lean_dojo_v2.lean_dojo.data_extraction.trace import get_traced_repo_path
 from lean_dojo_v2.utils.constants import DATA_DIR, RAID_DIR
+
+
+class _TeeWriter:
+    """Write stream output to multiple sinks."""
+
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for stream in self.streams:
+            stream.write(data)
+        return len(data)
+
+    def flush(self):
+        for stream in self.streams:
+            stream.flush()
 
 
 class BaseAgent(ABC):
@@ -122,20 +142,57 @@ class BaseAgent(ABC):
 
         traced_repo_path = get_traced_repo_path(repo, build_deps=self._get_build_deps())
 
-        server = Server(
-            imports=["Init", str(theorem.file_path).replace(".lean", "")],
-            project_path=traced_repo_path,
-        )
+        server_kwargs = {
+            "imports": ["Init", str(theorem.file_path).replace(".lean", "")],
+            "project_path": traced_repo_path,
+        }
 
-        print(f"Proving {theorem.full_name}")
-        result, used_tactics = self.prover.search(
-            server=server, theorem=theorem, verbose=False
-        )
-        print(result)
-        if result.success:
-            for tactic in used_tactics:
-                print(tactic)
-        else:
-            logger.info(f"No proof found for {theorem.full_name}")
+        # Optional pantograph runtime override for environments where the packaged
+        # pantograph-repl expects a different Lean stdlib than the traced repo's
+        # own toolchain.
+        stdlib_lean_path = os.environ.get("PANTOGRAPH_STDLIB_LEAN_PATH")
+        toolchain_bin = os.environ.get("PANTOGRAPH_TOOLCHAIN_BIN")
+        if stdlib_lean_path:
+            if toolchain_bin:
+                env = os.environ.copy()
+                env["PATH"] = f"{toolchain_bin}:{env.get('PATH', '')}"
+                subprocess.run(
+                    ["lake", "build"],
+                    cwd=traced_repo_path,
+                    env=env,
+                    check=True,
+                )
+
+            project_lean_path = os.path.join(
+                traced_repo_path, ".lake", "build", "lib", "lean"
+            )
+            server_kwargs["lean_path"] = f"{project_lean_path}:{stdlib_lean_path}"
+
+        server = Server(**server_kwargs)
+
+        proof_attempts_log = os.environ.get("PROOF_ATTEMPTS_LOG")
+        if not proof_attempts_log:
+            proof_attempts_log = os.path.join(RAID_DIR, "logs", "proof_attempts.log")
+        proof_attempts_log_path = Path(proof_attempts_log)
+        proof_attempts_log_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with proof_attempts_log_path.open("a", encoding="utf-8") as attempts_file:
+            tee = _TeeWriter(sys.stdout, attempts_file)
+            with redirect_stdout(tee):
+                print(
+                    f"\n=== THEOREM START [{datetime.now().isoformat(timespec='seconds')}] "
+                    f"{theorem.full_name} ==="
+                )
+                print(f"Proving {theorem.full_name}")
+                result, used_tactics = self.prover.search(
+                    server=server, theorem=theorem, verbose=True
+                )
+                print(result)
+                if result.success:
+                    for tactic in used_tactics:
+                        print(tactic)
+                else:
+                    logger.info(f"No proof found for {theorem.full_name}")
+                print(f"=== THEOREM END {theorem.full_name} ===")
 
         return result.success
