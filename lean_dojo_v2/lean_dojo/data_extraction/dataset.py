@@ -375,22 +375,6 @@ def setup_lean_environment(repo: LeanGitRepo) -> None:
     os.environ["PATH"] = f"{lean_dir}/bin:{os.environ.get('PATH', '')}"
 
 
-def _is_tracer_incompatible_with_repo(repo: LeanGitRepo) -> bool:
-    """Return whether the current ExtractData tracer is known to be incompatible."""
-    config = repo.get_config("lean-toolchain")
-    version = get_lean4_version_from_config(config["content"])
-
-    # ExtractData.lean currently relies on Lean APIs that changed in v4.21+.
-    # Fail fast to avoid expensive trace attempts that deterministically crash.
-    if not version.startswith("v"):
-        return False
-    try:
-        major, minor, _ = [int(_) for _ in version[1:].split("-")[0].split(".")]
-    except Exception:
-        return False
-    return major == 4 and minor >= 21
-
-
 # =============================================================================
 # MAIN DATASET GENERATION
 # =============================================================================
@@ -419,16 +403,6 @@ def generate_benchmark(
         Returns (None, 0, 0, 10) if tracing fails
     """
     logger.info(f"Repository: {repo}")
-
-    if _is_tracer_incompatible_with_repo(repo):
-        config = repo.get_config("lean-toolchain")
-        version = get_lean4_version_from_config(config["content"])
-        raise RuntimeError(
-            "Tracing aborted before build: "
-            f"ExtractData.lean is currently incompatible with repo toolchain {version} "
-            "(Lean 4.21+). Use a repo commit with an older lean-toolchain "
-            "or update ExtractData.lean for newer Lean APIs."
-        )
 
     # Configure Lean environment
     setup_lean_environment(repo)
