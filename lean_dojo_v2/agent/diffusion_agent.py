@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Optional
 
 from lean_dojo_v2.lean_agent.config import ProverConfig, TrainingConfig
@@ -11,6 +12,7 @@ class DiffusionAgent(BaseAgent):
     def __init__(
         self,
         trainer: Optional[DiffusionSFTTrainer] = None,
+        prover_ckpt_path: str = "inclusionAI/LLaDA-MoE-7B-A1B-Instruct",
         database_path: str = "dynamic_database.json",
         training_config: Optional[TrainingConfig] = None,
         prover_config: Optional[ProverConfig] = None,
@@ -20,9 +22,16 @@ class DiffusionAgent(BaseAgent):
         self.prover_config = prover_config or ProverConfig()
         self.trainer = trainer
         self.use_lora = False
+        self.output_dir = prover_ckpt_path
         if self.trainer:
-            self.output_dir = self.trainer.output_dir
             self.use_lora = self.trainer.lora_config is not None
+            # Prefer a trained local checkpoint if it exists; otherwise use base model.
+            trainer_output = Path(self.trainer.output_dir)
+            self.output_dir = (
+                self.trainer.output_dir
+                if trainer_output.exists()
+                else self.trainer.model_name
+            )
 
     def _get_build_deps(self) -> bool:
         """DiffusionAgent doesn't build dependencies by default."""
