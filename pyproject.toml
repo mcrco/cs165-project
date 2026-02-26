@@ -24,7 +24,7 @@ requires-python = ">=3.11"
 dependencies = [
     "torch>=1.12.0",
     "pytorch-lightning[extra]>=1.9.0",
-    "transformers>=4.54",
+    "transformers>=4.54,<5",
     "numpy>=1.21.0",
     "deepspeed>=0.7.0",
     "loguru>=0.6.0",
