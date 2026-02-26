@@ -120,8 +120,12 @@ class Node:
 
 
 def _parse_pos(
-    info: Dict[str, Any], lean_file: LeanFile
+    info: Any, lean_file: LeanFile
 ) -> Optional[Tuple[Optional[Pos], Optional[Pos]]]:
+    # SourceInfo.none: no source position available (serializes as {"none": {}} or "none")
+    if not isinstance(info, dict) or "none" in info:
+        return None
+
     if "synthetic" in info and not info["synthetic"]["canonical"]:
         return None
 
@@ -129,11 +133,11 @@ def _parse_pos(
         "original" in info
     ):  # | original (leading : Substring) (pos : String.Pos) (trailing : Substring) (endPos : String.Pos)
         start, end = info["original"]["pos"], info["original"]["endPos"]
-    else:
-        assert (
-            "synthetic" in info
-        )  # | synthetic (pos : String.Pos) (endPos : String.Pos) (canonical := false)
+    elif "synthetic" in info:
+        # | synthetic (pos : String.Pos) (endPos : String.Pos) (canonical := false)
         start, end = info["synthetic"]["pos"], info["synthetic"]["endPos"]
+    else:
+        return None
 
     start = lean_file.position_to_pos(start)
     end = lean_file.position_to_pos(end)
@@ -152,15 +156,18 @@ class AtomNode(Node):
         cls, atom_data: Dict[str, Any], lean_file: LeanFile
     ) -> Optional["AtomNode"]:
         info = atom_data["info"]
-        start, end = _parse_pos(info, lean_file)
+        pos_result = _parse_pos(info, lean_file)
+        start, end = (None, None) if pos_result is None else pos_result
 
         if "original" in info:
             leading = info["original"]["leading"]
             trailing = info["original"]["trailing"]
+        elif "synthetic" in info:
+            leading = info["synthetic"].get("leading", "")
+            trailing = info["synthetic"].get("trailing", "")
         else:
-            assert "synthetic" in info
-            leading = info["synthetic"]["leading"]
-            trailing = info["synthetic"]["trailing"]
+            # SourceInfo.none: no leading/trailing
+            leading, trailing = "", ""
 
         return cls(lean_file, start, end, [], leading, trailing, atom_data["val"])
 
@@ -183,16 +190,19 @@ class IdentNode(Node):
         cls, ident_data: Dict[str, Any], lean_file: LeanFile
     ) -> Optional["IdentNode"]:
         info = ident_data["info"]
-        start, end = _parse_pos(info, lean_file)
+        pos_result = _parse_pos(info, lean_file)
+        start, end = (None, None) if pos_result is None else pos_result
         assert ident_data["preresolved"] == []
 
         if "original" in info:
             leading = info["original"]["leading"]
             trailing = info["original"]["trailing"]
+        elif "synthetic" in info:
+            leading = info["synthetic"].get("leading", "")
+            trailing = info["synthetic"].get("trailing", "")
         else:
-            assert "synthetic" in info
-            leading = info["synthetic"]["leading"]
-            trailing = info["synthetic"]["trailing"]
+            # SourceInfo.none: no leading/trailing
+            leading, trailing = "", ""
 
         return cls(
             lean_file,
@@ -257,6 +267,15 @@ class FileNode(Node):
             children.append(node)
 
         return cls(lean_file, lean_file.start_pos, lean_file.end_pos, children)
+
+
+def _extract_comment_text(node: Node) -> str:
+    """Extract raw text from a node by traversing and collecting atom/ident values."""
+    if isinstance(node, AtomNode):
+        return node.val
+    if isinstance(node, IdentNode):
+        return node.val
+    return "".join(_extract_comment_text(child) for child in node.children)
 
 
 def _parse_children(node_data: Dict[str, Any], lean_file: LeanFile) -> List[Node]:
@@ -1422,9 +1441,11 @@ class CommandModuledocNode(Node):
         assert node_data["info"] == "none"
         start, end = None, None
         children = _parse_children(node_data, lean_file)
-        assert len(children) == 2 and all(isinstance(_, AtomNode) for _ in children)
-        assert children[0].val == "/-!"
-        comment = children[1].val
+        # moduleDoc: "/-!" >> commentBody - structure varies (simple atoms or Verso node)
+        if len(children) >= 1 and isinstance(children[0], AtomNode) and children[0].val == "/-!":
+            comment = "".join(_extract_comment_text(c) for c in children[1:])
+        else:
+            comment = "".join(_extract_comment_text(c) for c in children)
         return cls(lean_file, start, end, children, comment)
 
 
@@ -1439,9 +1460,10 @@ class CommandDoccommentNode(Node):
         assert node_data["info"] == "none"
         start, end = None, None
         children = _parse_children(node_data, lean_file)
-        assert len(children) == 2 and all(isinstance(_, AtomNode) for _ in children)
-        assert children[0].val == "/--"
-        comment = children[1].val
+        if len(children) >= 1 and isinstance(children[0], AtomNode) and children[0].val == "/--":
+            comment = "".join(_extract_comment_text(c) for c in children[1:])
+        else:
+            comment = "".join(_extract_comment_text(c) for c in children)
         return cls(lean_file, start, end, children, comment)
 
 

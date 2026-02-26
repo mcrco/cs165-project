@@ -79,7 +79,7 @@ class Cache:
         """
         dirpath = self.cache_dir / rel_cache_dir.parent
         cache_path = self.cache_dir / rel_cache_dir
-        if not dirpath.exists():
+        if not cache_path.exists():
             with self.lock:
                 with report_critical_failure(_CACHE_CORRPUTION_MSG):
                     shutil.copytree(src, cache_path)
