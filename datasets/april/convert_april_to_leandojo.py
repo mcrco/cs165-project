@@ -156,6 +156,12 @@ def main() -> None:
         default=None,
         help="Optional cap for quick pilot runs",
     )
+    parser.add_argument(
+        "--server-timeout",
+        type=int,
+        default=300,
+        help="Pantograph server startup/command timeout in seconds (default: 300)",
+    )
     args = parser.parse_args()
 
     rows = read_jsonl(args.input_jsonl)
@@ -167,6 +173,7 @@ def main() -> None:
     server = Server(
         imports=args.imports,
         project_path=str(args.project_path) if args.project_path else None,
+        timeout=args.server_timeout,
     )
 
     converted: list[dict[str, Any]] = []
