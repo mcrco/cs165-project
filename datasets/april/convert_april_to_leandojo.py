@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import tempfile
 from pathlib import Path
@@ -44,6 +45,18 @@ APRIL_DIR = Path(__file__).resolve().parent
 DEFAULT_INPUT_JSONL = APRIL_DIR / "raw" / "val" / "mlme_val.jsonl"
 DEFAULT_OUTPUT_JSON = APRIL_DIR / "leandojo" / "val.json"
 DEFAULT_PROJECT_PATH = APRIL_DIR / "april_eval_project"
+
+
+def configure_elan_toolchain(project_path: Path) -> None:
+    toolchain_file = project_path / "lean-toolchain"
+    if not toolchain_file.is_file():
+        return
+
+    toolchain = toolchain_file.read_text(encoding="utf-8").strip()
+    if not toolchain:
+        return
+
+    os.environ["ELAN_TOOLCHAIN"] = toolchain
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -148,6 +161,8 @@ def main() -> None:
     rows = read_jsonl(args.input_jsonl)
     if args.max_examples is not None:
         rows = rows[: args.max_examples]
+
+    configure_elan_toolchain(args.project_path)
 
     server = Server(
         imports=args.imports,
