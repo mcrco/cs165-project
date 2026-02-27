@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=leandojo-hf-agent
-#SBATCH --output=%x-%j.out
-#SBATCH --error=%x-%j.err
+#SBATCH --output=$HOME/cs165-project/logs/%x-%j.out
+#SBATCH --error=$HOME/cs165-project/logs/%x-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:h100:1
 #SBATCH --cpus-per-task=8
@@ -15,7 +15,7 @@ set -euo pipefail
 module purge
 module load python/3.11.6-gcc-13.2.0
 
-cd /home/marco/cs165-project
+cd $HOME/cs165-project
 source .venv/bin/activate
 
 # HF/HPC TLS + Xet workaround
