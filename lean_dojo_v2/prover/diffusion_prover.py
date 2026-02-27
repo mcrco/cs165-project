@@ -29,7 +29,10 @@ class DiffusionProver(BaseProver):
             self.device = torch.device(device)
 
         self.tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
-        self.model = AutoModelForCausalLM.from_pretrained(ckpt_path).to(self.device)
+        self.model = AutoModelForCausalLM.from_pretrained(
+            ckpt_path, 
+            trust_remote_code=ckpt_path == "inclusionAI/LLaDA-MoE-7B-A1B-Instruct"
+        ).to(self.device)
         self.mask_token_id = self.tokenizer.convert_tokens_to_ids("<|mdm_mask|>")
         if self.mask_token_id is None or self.mask_token_id < 0:
             # LLaDA mask token id (https://huggingface.co/inclusionAI/LLaDA-MoE-7B-A1B-Instruct)
