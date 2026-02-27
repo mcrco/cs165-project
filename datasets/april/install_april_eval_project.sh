@@ -69,10 +69,16 @@ require mathlib from git
 EOF
 
 echo "[setup] Resolving dependencies..."
-lake -d "$TARGET_DIR" update
+(
+  cd "$TARGET_DIR"
+  lake update
+)
 
 echo "[setup] Downloading mathlib cache (if available)..."
-lake -d "$TARGET_DIR" exe cache get
+(
+  cd "$TARGET_DIR"
+  lake exe cache get
+)
 
 echo "[done] APRIL eval project ready."
 echo "Use this in eval scripts:"
