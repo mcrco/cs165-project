@@ -51,7 +51,9 @@ class DiffusionSFTDataset:
         processed: List[Dict[str, Any]] = []
         for item in data:
             for tactic in item.get("traced_tactics", []):
-                tactic_text = remove_marks(tactic.get("tactic", "")).splitlines()[0].strip()
+                tactic_text = (
+                    remove_marks(tactic.get("tactic", "")).splitlines()[0].strip()
+                )
                 if not tactic_text or tactic_text == "sorry":
                     continue
 
@@ -133,13 +135,15 @@ class DiffusionDataCollator:
             if assistant_start >= seq_len:
                 continue
 
-            candidate_positions = torch.arange(assistant_start, seq_len, dtype=torch.long)
+            candidate_positions = torch.arange(
+                assistant_start, seq_len, dtype=torch.long
+            )
             if candidate_positions.numel() == 0:
                 continue
 
-            mask_ratio = torch.empty(1).uniform_(
-                self.min_mask_ratio, self.max_mask_ratio
-            ).item()
+            mask_ratio = (
+                torch.empty(1).uniform_(self.min_mask_ratio, self.max_mask_ratio).item()
+            )
             num_to_mask = max(1, int(round(candidate_positions.numel() * mask_ratio)))
             chosen = candidate_positions[
                 torch.randperm(candidate_positions.numel())[:num_to_mask]
@@ -157,7 +161,7 @@ class DiffusionDataCollator:
 
 class MdlmTrainer(Trainer):
     """
-    Only thing different between MDLM and ARLM is the compute_loss method 
+    Only thing different between MDLM and ARLM is the compute_loss method
     that computes denoising loss only on masked positions. We can reuse
     everything else for training MDLMs as well.
     """

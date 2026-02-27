@@ -11,10 +11,13 @@
 
 set -euo pipefail
 
+module purge
+module load python/3.11.6-gcc-13.2.0
+
 cd /home/marco/cs165-project
 source .venv/bin/activate
 
 # HF/HPC TLS + Xet workaround
 source ./hf_var_fixes.sh
 
-python -m lean_dojo_v2.agent.hf_agent
+srun python -m lean_dojo_v2.agent.hf_agent
