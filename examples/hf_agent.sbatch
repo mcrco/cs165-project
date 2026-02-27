@@ -16,6 +16,7 @@ module purge
 module load python/3.11.6-gcc-13.2.0
 
 cd $HOME/cs165-project
+mkdir -p logs/
 source .venv/bin/activate
 
 # HF/HPC TLS + Xet workaround
