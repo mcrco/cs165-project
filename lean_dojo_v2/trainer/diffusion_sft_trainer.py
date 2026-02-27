@@ -214,7 +214,8 @@ class DiffusionSFTTrainer:
 
         self.mask_token_id = self.tokenizer.convert_tokens_to_ids("<|mdm_mask|>")
         if self.mask_token_id is None or self.mask_token_id < 0:
-            self.mask_token_id = 156895
+            print(f"<|mdm_mask|> token not found in tokenizeer for {model_name}.")
+            self.mask_token_id = 156895  # LLaDA MoE default
 
         self.training_args = TrainingArguments(
             output_dir=output_dir,
