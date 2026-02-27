@@ -6,6 +6,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 TARGET_DIR="${SCRIPT_DIR}/april_eval_project"
+LEAN_TOOLCHAIN="leanprover/lean4:v4.27.0"
+MATHLIB_TAG="v4.27.0"
 
 usage() {
   cat <<'EOF'
@@ -65,8 +67,12 @@ open Lake DSL
 package «AprilEval»
 
 require mathlib from git
-  "https://github.com/leanprover-community/mathlib4.git"
+  "https://github.com/leanprover-community/mathlib4.git" @ "v4.27.0"
 EOF
+
+# Pantograph wheels bundle a repl built against Lean 4.27.x. Pinning both the
+# project toolchain and mathlib avoids .olean "incompatible header" failures.
+printf '%s\n' "$LEAN_TOOLCHAIN" > "$TARGET_DIR/lean-toolchain"
 
 echo "[setup] Resolving dependencies..."
 (
