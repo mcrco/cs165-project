@@ -52,7 +52,10 @@ mkdir -p "$TARGET_DIR"
 
 if [[ ! -f "$TARGET_DIR/lakefile.lean" ]]; then
   echo "[setup] Initializing Lean project at: $TARGET_DIR"
-  lake init AprilEval "$TARGET_DIR"
+  (
+    cd "$TARGET_DIR"
+    lake init AprilEval
+  )
 fi
 
 cat > "$TARGET_DIR/lakefile.lean" <<'EOF'
