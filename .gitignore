@@ -3,6 +3,9 @@
 *.olean
 **/__pycache__
 */.DS_Store
+datasets/april/april_eval_project
+datasets/april/leandojo
+datasets/april/raw
 
 *.pkl
 retrieval/bm25

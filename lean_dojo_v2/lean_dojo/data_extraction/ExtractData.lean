@@ -271,7 +271,11 @@ def findLean (mod : Name) : IO FilePath := do
     | some relativePath => path := relativePath
     | none => pure ()
 
-  assert! ← path.pathExists
+  -- Best-effort mapping: some elaborator-generated/internal module names (e.g. hygienic `_hyg` names)
+  -- do not correspond to concrete source files. Keep tracing tactics/premises robust by avoiding
+  -- a hard failure here; callers can still use `defPath` when it points to a real file.
+  if ¬(← path.pathExists) then
+    pure ()
   return path
 
 end Path
@@ -490,7 +494,7 @@ Trace all *.lean files in the current directory whose corresponding *.olean file
 def processAllFiles (noDeps : Bool) : IO Unit := do
     let cwd ← IO.currentDir
     assert! cwd.fileName != "lean4"
-    
+
     let mut tasks := #[]
     for path in ← System.FilePath.walkDir cwd do
       if ← shouldProcess path noDeps then

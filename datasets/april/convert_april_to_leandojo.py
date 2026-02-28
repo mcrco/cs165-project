@@ -31,18 +31,20 @@ Output format matches the JSON consumed by DiffusionSFTDataset:
 from __future__ import annotations
 
 import argparse
-from collections import Counter
 import json
 import os
 import re
-import tempfile
+import subprocess
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from pantograph import Server
-
 DEFAULT_URL = "https://huggingface.co/datasets/uw-math-ai/APRIL"
 APRIL_DIR = Path(__file__).resolve().parent
+REPO_ROOT = APRIL_DIR.parents[1]
+EXTRACT_DATA_PATH = (
+    REPO_ROOT / "lean_dojo_v2" / "lean_dojo" / "data_extraction" / "ExtractData.lean"
+)
 DEFAULT_INPUT_JSONL = APRIL_DIR / "raw" / "val" / "mlme_val.jsonl"
 DEFAULT_OUTPUT_JSON = APRIL_DIR / "leandojo" / "val.json"
 DEFAULT_PROJECT_PATH = APRIL_DIR / "april_eval_project"
@@ -96,32 +98,100 @@ def infer_statement(code: str) -> str:
     return ""
 
 
-def trace_proof(server: Server, code: str, file_name: Path) -> list[dict[str, Any]]:
-    file_name.write_text(code, encoding="utf-8")
-    units = server.tactic_invocations(file_name)
+def run_extract_data(
+    project_path: Path,
+    lean_relative_path: Path,
+    timeout_seconds: int,
+) -> tuple[int, str, str]:
+    cmd = [
+        "lake",
+        "env",
+        "lean",
+        "--run",
+        str(EXTRACT_DATA_PATH),
+        str(lean_relative_path),
+    ]
+    proc = subprocess.run(
+        cmd,
+        cwd=project_path,
+        capture_output=True,
+        text=True,
+        timeout=timeout_seconds,
+        check=False,
+    )
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def get_ast_json_path(project_path: Path, lean_relative_path: Path) -> Path | None:
+    rel = lean_relative_path.with_suffix(".ast.json")
+    candidates = [
+        project_path / ".lake" / "build" / "ir" / rel,
+        project_path / "build" / "ir" / rel,
+    ]
+    for p in candidates:
+        if p.is_file():
+            return p
+    return None
+
+
+def extract_raw_tactic(code_bytes: bytes, start: int, end: int) -> str:
+    if start < 0 or end < start:
+        return ""
+    if start >= len(code_bytes):
+        return ""
+    end = min(end, len(code_bytes))
+    return code_bytes[start:end].decode("utf-8", errors="ignore").strip()
+
+
+def parse_byte_offset(value: Any) -> int | None:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, dict):
+        byte_idx = value.get("byteIdx")
+        if isinstance(byte_idx, int):
+            return byte_idx
+    return None
+
+
+def traced_tactics_from_ast(ast_json_path: Path, code: str) -> list[dict[str, Any]]:
+    payload = json.loads(ast_json_path.read_text(encoding="utf-8"))
+    raw_tactics = payload.get("tactics", [])
+    code_bytes = code.encode("utf-8")
 
     traced_tactics: list[dict[str, Any]] = []
-    for unit in units:
-        if not unit.invocations:
+    seen: set[tuple[str, str, str]] = set()
+    for tac in raw_tactics:
+        if not isinstance(tac, dict):
             continue
-        for inv in unit.invocations:
-            tactic = (inv.tactic or "").strip()
-            state_before = (inv.before or "").strip()
-            state_after = (inv.after or "").strip()
 
-            if not tactic or tactic == "sorry":
-                continue
-            if state_before == "no goals" or "·" in tactic:
-                continue
+        start = parse_byte_offset(tac.get("pos"))
+        end = parse_byte_offset(tac.get("endPos"))
+        if start is None or end is None:
+            continue
 
-            traced_tactics.append(
-                {
-                    "tactic": tactic,
-                    "annotated_tactic": [tactic, []],
-                    "state_before": state_before,
-                    "state_after": state_after,
-                }
-            )
+        tactic = extract_raw_tactic(code_bytes, start, end)
+        state_before = str(tac.get("stateBefore") or "").strip()
+        state_after = str(tac.get("stateAfter") or "").strip()
+
+        if not tactic or tactic == "sorry":
+            continue
+        if state_before == "no goals" or "·" in tactic:
+            continue
+
+        sig = (state_before, tactic, state_after)
+        if sig in seen:
+            continue
+        seen.add(sig)
+
+        traced_tactics.append(
+            {
+                "tactic": tactic,
+                "annotated_tactic": [tactic, []],
+                "state_before": state_before,
+                "state_after": state_after,
+            }
+        )
+
     return traced_tactics
 
 
@@ -140,16 +210,10 @@ def main() -> None:
         help=f"LeanDojo output JSON (default: {DEFAULT_OUTPUT_JSON})",
     )
     parser.add_argument(
-        "--imports",
-        nargs="+",
-        default=["Mathlib"],
-        help="Pantograph imports for tracing (default: Mathlib)",
-    )
-    parser.add_argument(
         "--project-path",
         type=Path,
         default=DEFAULT_PROJECT_PATH,
-        help=f"Lean project root to resolve imports/dependencies (default: {DEFAULT_PROJECT_PATH})",
+        help=f"Lean project root for running ExtractData.lean (default: {DEFAULT_PROJECT_PATH})",
     )
     parser.add_argument(
         "--max-examples",
@@ -158,10 +222,10 @@ def main() -> None:
         help="Optional cap for quick pilot runs",
     )
     parser.add_argument(
-        "--server-timeout",
+        "--extract-timeout",
         type=int,
         default=300,
-        help="Pantograph server startup/command timeout in seconds (default: 300)",
+        help="Per-file timeout (seconds) for `lake env lean --run ExtractData.lean` (default: 300)",
     )
     parser.add_argument(
         "--failure-log",
@@ -182,67 +246,120 @@ def main() -> None:
         rows = rows[: args.max_examples]
 
     configure_elan_toolchain(args.project_path)
-
-    server = Server(
-        imports=args.imports,
-        project_path=str(args.project_path) if args.project_path else None,
-        timeout=args.server_timeout,
-    )
+    if not args.project_path.is_dir():
+        raise FileNotFoundError(f"Project path does not exist: {args.project_path}")
+    if not EXTRACT_DATA_PATH.is_file():
+        raise FileNotFoundError(f"Missing ExtractData.lean at: {EXTRACT_DATA_PATH}")
 
     converted: list[dict[str, Any]] = []
     num_failed = 0
     failure_rows: list[dict[str, Any]] = []
     failure_reasons: Counter[str] = Counter()
 
-    def record_failure(row_idx: int, row: dict[str, Any], reason: str) -> None:
+    def record_failure(
+        row_idx: int, row: dict[str, Any], reason: str, detail: str | None = None
+    ) -> None:
         failure_reasons[reason] += 1
-        failure_rows.append(
+        rec = {
+            "row_idx": row_idx,
+            "reason": reason,
+            "path": row.get("path"),
+            "theorem": row.get("theorem"),
+        }
+        if detail:
+            rec["detail"] = detail
+        failure_rows.append(rec)
+
+    # Keep generated files under a real module root so Lean can resolve module names.
+    tmp_dir = args.project_path / "AprilEval" / "Generated"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    for p in tmp_dir.glob("ex_*.lean"):
+        p.unlink()
+
+    for i, row in enumerate(rows):
+        code = row.get("correct_proof")
+        if not isinstance(code, str) or not code.strip():
+            num_failed += 1
+            record_failure(i, row, "missing_or_empty_correct_proof")
+            continue
+
+        tmp_file = tmp_dir / f"ex_{i}.lean"
+        tmp_rel = tmp_file.relative_to(args.project_path)
+        tmp_file.write_text(code, encoding="utf-8")
+
+        try:
+            returncode, stdout, stderr = run_extract_data(
+                args.project_path,
+                tmp_rel,
+                timeout_seconds=args.extract_timeout,
+            )
+        except subprocess.TimeoutExpired as ex:
+            num_failed += 1
+            record_failure(
+                i,
+                row,
+                "extractdata_timeout",
+                detail=str(ex),
+            )
+            continue
+        except Exception as ex:
+            num_failed += 1
+            record_failure(
+                i,
+                row,
+                f"extractdata_exception:{type(ex).__name__}",
+                detail=str(ex),
+            )
+            continue
+
+        if returncode != 0:
+            num_failed += 1
+            detail = (stderr or stdout).strip()
+            if detail:
+                detail = detail[:1000]
+            record_failure(i, row, "extractdata_process_error", detail=detail)
+            continue
+
+        ast_json_path = get_ast_json_path(args.project_path, tmp_rel)
+        if ast_json_path is None:
+            num_failed += 1
+            record_failure(i, row, "missing_ast_json", detail=str(tmp_rel))
+            continue
+
+        try:
+            traced_tactics = traced_tactics_from_ast(ast_json_path, code)
+        except Exception as ex:
+            num_failed += 1
+            record_failure(
+                i,
+                row,
+                f"parse_ast_json_exception:{type(ex).__name__}",
+                detail=str(ex),
+            )
+            continue
+
+        if not traced_tactics:
+            num_failed += 1
+            record_failure(i, row, "no_traced_tactics")
+            continue
+
+        theorem_name = infer_full_name(row, i)
+        theorem_statement = infer_statement(code)
+
+        file_path = str(row.get("path") or f"APRIL/{i}.lean")
+
+        converted.append(
             {
-                "row_idx": row_idx,
-                "reason": reason,
-                "path": row.get("path"),
-                "theorem": row.get("theorem"),
+                "url": DEFAULT_URL,
+                "commit": row.get("src_commit") or "",
+                "file_path": file_path,
+                "full_name": theorem_name,
+                "theorem_statement": theorem_statement,
+                "start": [1, 1],
+                "end": [1, 1],
+                "traced_tactics": traced_tactics,
             }
         )
-
-    with tempfile.TemporaryDirectory(prefix="april_trace_") as d:
-        tmp_dir = Path(d)
-        for i, row in enumerate(rows):
-            code = row.get("correct_proof")
-            if not isinstance(code, str) or not code.strip():
-                num_failed += 1
-                record_failure(i, row, "missing_or_empty_correct_proof")
-                continue
-
-            tmp_file = tmp_dir / f"ex_{i}.lean"
-            try:
-                traced_tactics = trace_proof(server, code, tmp_file)
-            except Exception as ex:
-                num_failed += 1
-                record_failure(i, row, f"trace_exception:{type(ex).__name__}")
-                continue
-
-            if not traced_tactics:
-                num_failed += 1
-                record_failure(i, row, "no_traced_tactics")
-                continue
-
-            full_name = infer_full_name(row, i)
-            theorem_statement = infer_statement(code)
-            file_path = str(row.get("path") or f"APRIL/{i}.lean")
-
-            converted.append(
-                {
-                    "url": DEFAULT_URL,
-                    "commit": row.get("src_commit") or "",
-                    "file_path": file_path,
-                    "full_name": full_name,
-                    "theorem_statement": theorem_statement,
-                    "start": [1, 1],
-                    "end": [1, 1],
-                    "traced_tactics": traced_tactics,
-                }
-            )
 
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
     args.output_json.write_text(
