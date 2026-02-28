@@ -31,6 +31,7 @@ Output format matches the JSON consumed by DiffusionSFTDataset:
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import json
 import os
 import re
@@ -162,6 +163,18 @@ def main() -> None:
         default=300,
         help="Pantograph server startup/command timeout in seconds (default: 300)",
     )
+    parser.add_argument(
+        "--failure-log",
+        type=Path,
+        default=None,
+        help="Optional JSONL path to write per-row failure diagnostics",
+    )
+    parser.add_argument(
+        "--print-failures",
+        type=int,
+        default=0,
+        help="Print the first N failure diagnostics to stdout (default: 0)",
+    )
     args = parser.parse_args()
 
     rows = read_jsonl(args.input_jsonl)
@@ -178,6 +191,19 @@ def main() -> None:
 
     converted: list[dict[str, Any]] = []
     num_failed = 0
+    failure_rows: list[dict[str, Any]] = []
+    failure_reasons: Counter[str] = Counter()
+
+    def record_failure(row_idx: int, row: dict[str, Any], reason: str) -> None:
+        failure_reasons[reason] += 1
+        failure_rows.append(
+            {
+                "row_idx": row_idx,
+                "reason": reason,
+                "path": row.get("path"),
+                "theorem": row.get("theorem"),
+            }
+        )
 
     with tempfile.TemporaryDirectory(prefix="april_trace_") as d:
         tmp_dir = Path(d)
@@ -185,17 +211,20 @@ def main() -> None:
             code = row.get("correct_proof")
             if not isinstance(code, str) or not code.strip():
                 num_failed += 1
+                record_failure(i, row, "missing_or_empty_correct_proof")
                 continue
 
             tmp_file = tmp_dir / f"ex_{i}.lean"
             try:
                 traced_tactics = trace_proof(server, code, tmp_file)
-            except Exception:
+            except Exception as ex:
                 num_failed += 1
+                record_failure(i, row, f"trace_exception:{type(ex).__name__}")
                 continue
 
             if not traced_tactics:
                 num_failed += 1
+                record_failure(i, row, "no_traced_tactics")
                 continue
 
             full_name = infer_full_name(row, i)
@@ -220,10 +249,29 @@ def main() -> None:
         json.dumps(converted, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
+    if args.failure_log is not None:
+        args.failure_log.parent.mkdir(parents=True, exist_ok=True)
+        with args.failure_log.open("w", encoding="utf-8") as f:
+            for rec in failure_rows:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
     total = len(rows)
     ok = len(converted)
     print(f"Converted {ok}/{total} rows. Failed/no tactics: {num_failed}")
     print(f"Wrote: {args.output_json}")
+    if failure_reasons:
+        print("Failure reasons:")
+        for reason, count in failure_reasons.most_common():
+            print(f"  - {reason}: {count}")
+    if args.failure_log is not None:
+        print(f"Failure log: {args.failure_log}")
+    if args.print_failures > 0 and failure_rows:
+        print(f"First {min(args.print_failures, len(failure_rows))} failures:")
+        for rec in failure_rows[: args.print_failures]:
+            print(
+                f"  - row={rec['row_idx']} reason={rec['reason']} "
+                f"path={rec['path']} theorem={rec['theorem']}"
+            )
 
 
 if __name__ == "__main__":
