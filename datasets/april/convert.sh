@@ -27,7 +27,7 @@ for input in raw/*/*.jsonl; do
   mkdir -p "$(dirname "${output}")" "$(dirname "${failure_log}")"
 
   echo "[convert] ${input} -> ${output}"
-  python3 convert_april_to_leandojo.py \
+  uv run python convert_april_to_leandojo.py \
     --input-jsonl "${input}" \
     --output-json "${output}" \
     --failure-log "${failure_log}"
