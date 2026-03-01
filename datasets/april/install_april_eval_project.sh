@@ -6,8 +6,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 TARGET_DIR="${SCRIPT_DIR}/april_eval_project"
-LEAN_TOOLCHAIN="leanprover/lean4:v4.22.0-rc4"
-MATHLIB_TAG="v4.22.0-rc4"
+LEAN_TOOLCHAIN="leanprover/lean4:v4.27.0"
+MATHLIB_TAG="v4.27.0"
 
 usage() {
   cat <<'EOF'
@@ -70,7 +70,9 @@ require mathlib from git
   "https://github.com/leanprover-community/mathlib4.git" @ "$MATHLIB_TAG"
 EOF
 
-# Keep Lean and mathlib pinned to the APRIL paper repo defaults for compatibility.
+# NOTE: APRIL repo metadata references Lean v4.22.0-rc4, but this project uses
+# ExtractData.lean from LeanDojo, which depends on newer Lean APIs and fails on v4.22.
+# Keep Lean/mathlib at v4.27.0 unless ExtractData.lean is backported.
 printf '%s\n' "$LEAN_TOOLCHAIN" > "$TARGET_DIR/lean-toolchain"
 
 echo "[setup] Resolving dependencies..."
