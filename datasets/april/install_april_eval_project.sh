@@ -6,8 +6,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 TARGET_DIR="${SCRIPT_DIR}/april_eval_project"
-LEAN_TOOLCHAIN="leanprover/lean4:v4.27.0"
-MATHLIB_TAG="v4.27.0"
+LEAN_TOOLCHAIN="leanprover/lean4:v4.22.0-rc4"
+MATHLIB_TAG="v4.22.0-rc4"
 
 usage() {
   cat <<'EOF'
@@ -60,23 +60,24 @@ if [[ ! -f "$TARGET_DIR/lakefile.lean" ]]; then
   )
 fi
 
-cat > "$TARGET_DIR/lakefile.lean" <<'EOF'
+cat > "$TARGET_DIR/lakefile.lean" <<EOF
 import Lake
 open Lake DSL
 
 package «AprilEval»
 
 require mathlib from git
-  "https://github.com/leanprover-community/mathlib4.git" @ "v4.27.0"
+  "https://github.com/leanprover-community/mathlib4.git" @ "$MATHLIB_TAG"
 EOF
 
-# Pantograph wheels bundle a repl built against Lean 4.27.x. Pinning both the
-# project toolchain and mathlib avoids .olean "incompatible header" failures.
+# Keep Lean and mathlib pinned to the APRIL paper repo defaults for compatibility.
 printf '%s\n' "$LEAN_TOOLCHAIN" > "$TARGET_DIR/lean-toolchain"
 
 echo "[setup] Resolving dependencies..."
 (
   cd "$TARGET_DIR"
+  echo "[setup] Purging Lake build/cache artifacts to avoid stale .olean/.trace incompatibilities..."
+  rm -rf .lake build
   lake update
 )
 
