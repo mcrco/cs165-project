@@ -34,6 +34,7 @@ import argparse
 import json
 import os
 import re
+import signal
 import subprocess
 from collections import Counter
 from pathlib import Path
@@ -111,15 +112,27 @@ def run_extract_data(
         str(EXTRACT_DATA_PATH),
         str(lean_relative_path),
     ]
-    proc = subprocess.run(
+    proc = subprocess.Popen(
         cmd,
         cwd=project_path,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=timeout_seconds,
-        check=False,
+        start_new_session=True,
     )
-    return proc.returncode, proc.stdout, proc.stderr
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired as ex:
+        if proc.poll() is None:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        stdout, stderr = proc.communicate()
+        ex.stdout = stdout
+        ex.stderr = stderr
+        raise
+    return proc.returncode, stdout, stderr
 
 
 def get_ast_json_path(project_path: Path, lean_relative_path: Path) -> Path | None:
