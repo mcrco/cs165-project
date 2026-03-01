@@ -40,6 +40,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from tqdm.auto import tqdm
+
 DEFAULT_URL = "https://huggingface.co/datasets/uw-math-ai/APRIL"
 APRIL_DIR = Path(__file__).resolve().parent
 REPO_ROOT = APRIL_DIR.parents[1]
@@ -289,7 +291,14 @@ def main() -> None:
     for p in tmp_dir.glob("ex_*.lean"):
         p.unlink()
 
-    for i, row in enumerate(rows):
+    row_iter = tqdm(
+        enumerate(rows),
+        total=len(rows),
+        desc=f"Converting {args.input_jsonl.name}",
+        unit="row",
+    )
+
+    for i, row in row_iter:
         code = row.get("correct_proof")
         if not isinstance(code, str) or not code.strip():
             num_failed += 1
@@ -373,6 +382,8 @@ def main() -> None:
                 "traced_tactics": traced_tactics,
             }
         )
+        if (i + 1) % 25 == 0:
+            row_iter.set_postfix(ok=len(converted), failed=num_failed)
 
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
     args.output_json.write_text(
