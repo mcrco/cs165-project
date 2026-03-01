@@ -68,6 +68,8 @@ package «AprilEval»
 
 require mathlib from git
   "https://github.com/leanprover-community/mathlib4.git" @ "$MATHLIB_TAG"
+
+lean_lib «AprilEval»
 EOF
 
 # NOTE: APRIL repo metadata references Lean v4.22.0-rc4, but this project uses
