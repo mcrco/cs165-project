@@ -37,6 +37,7 @@ import re
 import signal
 import subprocess
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -210,6 +211,132 @@ def traced_tactics_from_ast(ast_json_path: Path, code: str) -> list[dict[str, An
     return traced_tactics
 
 
+def process_row(
+    row_idx: int,
+    row: dict[str, Any],
+    project_path: Path,
+    tmp_dir: Path,
+    extract_timeout: int,
+) -> tuple[int, dict[str, Any] | None, dict[str, Any] | None]:
+    code = row.get("correct_proof")
+    if not isinstance(code, str) or not code.strip():
+        return (
+            row_idx,
+            None,
+            {
+                "row_idx": row_idx,
+                "reason": "missing_or_empty_correct_proof",
+                "path": row.get("path"),
+                "theorem": row.get("theorem"),
+            },
+        )
+
+    tmp_file = tmp_dir / f"ex_{row_idx}.lean"
+    tmp_rel = tmp_file.relative_to(project_path)
+    tmp_file.write_text(code, encoding="utf-8")
+
+    try:
+        returncode, stdout, stderr = run_extract_data(
+            project_path,
+            tmp_rel,
+            timeout_seconds=extract_timeout,
+        )
+    except subprocess.TimeoutExpired as ex:
+        return (
+            row_idx,
+            None,
+            {
+                "row_idx": row_idx,
+                "reason": "extractdata_timeout",
+                "path": row.get("path"),
+                "theorem": row.get("theorem"),
+                "detail": str(ex),
+            },
+        )
+    except Exception as ex:
+        return (
+            row_idx,
+            None,
+            {
+                "row_idx": row_idx,
+                "reason": f"extractdata_exception:{type(ex).__name__}",
+                "path": row.get("path"),
+                "theorem": row.get("theorem"),
+                "detail": str(ex),
+            },
+        )
+
+    if returncode != 0:
+        detail = (stderr or stdout).strip()
+        if detail:
+            detail = detail[:1000]
+        rec = {
+            "row_idx": row_idx,
+            "reason": "extractdata_process_error",
+            "path": row.get("path"),
+            "theorem": row.get("theorem"),
+        }
+        if detail:
+            rec["detail"] = detail
+        return row_idx, None, rec
+
+    ast_json_path = get_ast_json_path(project_path, tmp_rel)
+    if ast_json_path is None:
+        return (
+            row_idx,
+            None,
+            {
+                "row_idx": row_idx,
+                "reason": "missing_ast_json",
+                "path": row.get("path"),
+                "theorem": row.get("theorem"),
+                "detail": str(tmp_rel),
+            },
+        )
+
+    try:
+        traced_tactics = traced_tactics_from_ast(ast_json_path, code)
+    except Exception as ex:
+        return (
+            row_idx,
+            None,
+            {
+                "row_idx": row_idx,
+                "reason": f"parse_ast_json_exception:{type(ex).__name__}",
+                "path": row.get("path"),
+                "theorem": row.get("theorem"),
+                "detail": str(ex),
+            },
+        )
+
+    if not traced_tactics:
+        return (
+            row_idx,
+            None,
+            {
+                "row_idx": row_idx,
+                "reason": "no_traced_tactics",
+                "path": row.get("path"),
+                "theorem": row.get("theorem"),
+            },
+        )
+
+    theorem_name = infer_full_name(row, row_idx)
+    theorem_statement = infer_statement(code)
+    file_path = str(row.get("path") or f"APRIL/{row_idx}.lean")
+    converted = {
+        "url": DEFAULT_URL,
+        "commit": row.get("src_commit") or "",
+        "file_path": file_path,
+        "full_name": theorem_name,
+        "theorem_statement": theorem_statement,
+        "start": [1, 1],
+        "end": [1, 1],
+        "traced_tactics": traced_tactics,
+    }
+    return row_idx, converted, None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -243,6 +370,12 @@ def main() -> None:
         help="Per-file timeout (seconds) for `lake env lean --run ExtractData.lean` (default: 300)",
     )
     parser.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        help="Number of concurrent worker threads for conversion (default: 1)",
+    )
+    parser.add_argument(
         "--failure-log",
         type=Path,
         default=None,
@@ -266,24 +399,10 @@ def main() -> None:
     if not EXTRACT_DATA_PATH.is_file():
         raise FileNotFoundError(f"Missing ExtractData.lean at: {EXTRACT_DATA_PATH}")
 
-    converted: list[dict[str, Any]] = []
+    converted_by_idx: dict[int, dict[str, Any]] = {}
     num_failed = 0
     failure_rows: list[dict[str, Any]] = []
     failure_reasons: Counter[str] = Counter()
-
-    def record_failure(
-        row_idx: int, row: dict[str, Any], reason: str, detail: str | None = None
-    ) -> None:
-        failure_reasons[reason] += 1
-        rec = {
-            "row_idx": row_idx,
-            "reason": reason,
-            "path": row.get("path"),
-            "theorem": row.get("theorem"),
-        }
-        if detail:
-            rec["detail"] = detail
-        failure_rows.append(rec)
 
     # Keep generated files under a real module root so Lean can resolve module names.
     tmp_dir = args.project_path / "AprilEval" / "Generated"
@@ -291,99 +410,64 @@ def main() -> None:
     for p in tmp_dir.glob("ex_*.lean"):
         p.unlink()
 
-    row_iter = tqdm(
-        enumerate(rows),
+    if args.jobs < 1:
+        raise ValueError("--jobs must be >= 1")
+
+    progress = tqdm(
         total=len(rows),
         desc=f"Converting {args.input_jsonl.name}",
         unit="row",
     )
 
-    for i, row in row_iter:
-        code = row.get("correct_proof")
-        if not isinstance(code, str) or not code.strip():
+    def ingest_result(
+        result: tuple[int, dict[str, Any] | None, dict[str, Any] | None],
+    ) -> None:
+        nonlocal num_failed
+        row_idx, converted_rec, failure_rec = result
+        if converted_rec is not None:
+            converted_by_idx[row_idx] = converted_rec
+        elif failure_rec is not None:
             num_failed += 1
-            record_failure(i, row, "missing_or_empty_correct_proof")
-            continue
+            failure_rows.append(failure_rec)
+            failure_reasons[failure_rec["reason"]] += 1
 
-        tmp_file = tmp_dir / f"ex_{i}.lean"
-        tmp_rel = tmp_file.relative_to(args.project_path)
-        tmp_file.write_text(code, encoding="utf-8")
-
-        try:
-            returncode, stdout, stderr = run_extract_data(
-                args.project_path,
-                tmp_rel,
-                timeout_seconds=args.extract_timeout,
+    if args.jobs == 1:
+        for row_idx, row in enumerate(rows):
+            ingest_result(
+                process_row(
+                    row_idx,
+                    row,
+                    args.project_path,
+                    tmp_dir,
+                    args.extract_timeout,
+                )
             )
-        except subprocess.TimeoutExpired as ex:
-            num_failed += 1
-            record_failure(
-                i,
-                row,
-                "extractdata_timeout",
-                detail=str(ex),
-            )
-            continue
-        except Exception as ex:
-            num_failed += 1
-            record_failure(
-                i,
-                row,
-                f"extractdata_exception:{type(ex).__name__}",
-                detail=str(ex),
-            )
-            continue
+            progress.update(1)
+            if progress.n % 25 == 0:
+                progress.set_postfix(ok=len(converted_by_idx), failed=num_failed)
+    else:
+        with ThreadPoolExecutor(max_workers=args.jobs) as executor:
+            futures = [
+                executor.submit(
+                    process_row,
+                    row_idx,
+                    row,
+                    args.project_path,
+                    tmp_dir,
+                    args.extract_timeout,
+                )
+                for row_idx, row in enumerate(rows)
+            ]
+            for future in as_completed(futures):
+                ingest_result(future.result())
+                progress.update(1)
+                if progress.n % 25 == 0:
+                    progress.set_postfix(ok=len(converted_by_idx), failed=num_failed)
 
-        if returncode != 0:
-            num_failed += 1
-            detail = (stderr or stdout).strip()
-            if detail:
-                detail = detail[:1000]
-            record_failure(i, row, "extractdata_process_error", detail=detail)
-            continue
+    progress.close()
 
-        ast_json_path = get_ast_json_path(args.project_path, tmp_rel)
-        if ast_json_path is None:
-            num_failed += 1
-            record_failure(i, row, "missing_ast_json", detail=str(tmp_rel))
-            continue
-
-        try:
-            traced_tactics = traced_tactics_from_ast(ast_json_path, code)
-        except Exception as ex:
-            num_failed += 1
-            record_failure(
-                i,
-                row,
-                f"parse_ast_json_exception:{type(ex).__name__}",
-                detail=str(ex),
-            )
-            continue
-
-        if not traced_tactics:
-            num_failed += 1
-            record_failure(i, row, "no_traced_tactics")
-            continue
-
-        theorem_name = infer_full_name(row, i)
-        theorem_statement = infer_statement(code)
-
-        file_path = str(row.get("path") or f"APRIL/{i}.lean")
-
-        converted.append(
-            {
-                "url": DEFAULT_URL,
-                "commit": row.get("src_commit") or "",
-                "file_path": file_path,
-                "full_name": theorem_name,
-                "theorem_statement": theorem_statement,
-                "start": [1, 1],
-                "end": [1, 1],
-                "traced_tactics": traced_tactics,
-            }
-        )
-        if (i + 1) % 25 == 0:
-            row_iter.set_postfix(ok=len(converted), failed=num_failed)
+    converted = [converted_by_idx[i] for i in sorted(converted_by_idx)]
+    failure_rows.sort(key=lambda rec: rec["row_idx"])
 
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
     args.output_json.write_text(
