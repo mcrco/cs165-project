@@ -28,12 +28,14 @@ if [[ -f "${VENV_PATH:-.venv/bin/activate}" ]]; then
   source "${VENV_PATH:-.venv/bin/activate}"
 fi
 
-if [[ -z "${FILELIST:-}" ]]; then
-  echo "ERROR: FILELIST env var is required." >&2
+TEST_DIR="${TEST_DIR:-datasets/april/leandojo/test}"
+MODEL_TYPE="${MODEL_TYPE:-hf}"
+if [[ ! -d "$TEST_DIR" ]]; then
+  echo "ERROR: TEST_DIR does not exist: $TEST_DIR" >&2
   exit 1
 fi
-if [[ -z "${MODEL_TYPE:-}" ]]; then
-  echo "ERROR: MODEL_TYPE env var is required (diffusion|hf)." >&2
+if [[ "$MODEL_TYPE" != "diffusion" && "$MODEL_TYPE" != "hf" ]]; then
+  echo "ERROR: Unsupported MODEL_TYPE=$MODEL_TYPE (expected hf|diffusion)." >&2
   exit 1
 fi
 
@@ -53,12 +55,17 @@ if [[ -z "${CKPT:-}" ]]; then
   esac
 fi
 
-line_no=$((SLURM_ARRAY_TASK_ID + 1))
-DATA_JSON="$(sed -n "${line_no}p" "$FILELIST")"
-if [[ -z "${DATA_JSON}" ]]; then
+# Build deterministic ordering per task at runtime to avoid stale filelist paths.
+mapfile -t data_files < <(find "$TEST_DIR" -maxdepth 1 -type f -name '*.json' | sort)
+if [[ "${#data_files[@]}" -eq 0 ]]; then
+  echo "ERROR: No JSON files found in TEST_DIR=$TEST_DIR" >&2
+  exit 1
+fi
+if (( SLURM_ARRAY_TASK_ID < 0 || SLURM_ARRAY_TASK_ID >= ${#data_files[@]} )); then
   echo "ERROR: No data file for SLURM_ARRAY_TASK_ID=${SLURM_ARRAY_TASK_ID}" >&2
   exit 1
 fi
+DATA_JSON="${data_files[$SLURM_ARRAY_TASK_ID]}"
 
 basename_no_ext="$(basename "${DATA_JSON%.*}")"
 OUT_DIR="${OUT_DIR:-logs/proof_search/${SLURM_ARRAY_JOB_ID}}"
@@ -86,6 +93,8 @@ fi
 
 {
   echo "[$(date -Is)] Starting proof search"
+  echo "repo_dir=$REPO_DIR"
+  echo "test_dir=$TEST_DIR"
   echo "data_json=$DATA_JSON"
   echo "model_type=$MODEL_TYPE"
   echo "ckpt=$CKPT"

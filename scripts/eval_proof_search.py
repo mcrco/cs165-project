@@ -21,7 +21,7 @@ from lean_dojo_v2.prover.hf_prover import HFProver
 
 REPO_DIR = Path(__file__).resolve().parents[1]
 APRIL_DIR = REPO_DIR / "datasets" / "april"
-DEFAULT_DATA_JSON = APRIL_DIR / "leandojo" / "val.json"
+DEFAULT_DATA_JSON = APRIL_DIR / "leandojo" / "test/thme_test.json"
 DEFAULT_PROJECT_PATH = APRIL_DIR / "april_eval_project"
 
 
