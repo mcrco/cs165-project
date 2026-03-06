@@ -6,6 +6,9 @@
 datasets/april/april_eval_project
 datasets/april/leandojo
 datasets/april/raw
+datasets/numina-math-lean/numina_math_lean_eval_project
+datasets/numina-math-lean/leandojo
+datasets/numina-math-lean/raw
 
 *.pkl
 retrieval/bm25
