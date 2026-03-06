@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH -p expansion
-#SBATCH --time=12:00:00
-#SBATCH -c 4
-#SBATCH --mem=16G
+#SBATCH --time=24:00:00
+#SBATCH -c 16
+#SBATCH --mem=32g
 
 set -euo pipefail
 
