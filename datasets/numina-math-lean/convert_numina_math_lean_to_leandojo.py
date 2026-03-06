@@ -22,8 +22,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
-from datasets import load_dataset
 from tqdm.auto import tqdm
+
+from datasets import load_dataset
 
 DEFAULT_URL = "https://huggingface.co/datasets/AI-MO/NuminaMath-LEAN"
 NUMINA_DIR = Path(__file__).resolve().parent
@@ -98,7 +99,9 @@ def parse_proof_fields(raw: str) -> list[str]:
     return fields
 
 
-def select_proof(row: dict[str, Any], proof_fields: list[str]) -> tuple[str | None, str]:
+def select_proof(
+    row: dict[str, Any], proof_fields: list[str]
+) -> tuple[str | None, str]:
     for field in proof_fields:
         val = row.get(field)
         if isinstance(val, str) and val.strip():
@@ -146,9 +149,16 @@ def run_extract_data(
         str(EXTRACT_DATA_PATH),
         str(lean_relative_path),
     ]
+    env = os.environ.copy()
+    prev_lean_path = env.get("LEAN_PATH", "")
+    env["LEAN_PATH"] = (
+        f"{project_path}:{prev_lean_path}" if prev_lean_path else str(project_path)
+    )
+
     proc = subprocess.Popen(
         cmd,
         cwd=project_path,
+        env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -274,6 +284,14 @@ def process_row(
             timeout_seconds=extract_timeout,
         )
     except subprocess.TimeoutExpired as ex:
+        timeout_stdout = (ex.stdout or "").strip()
+        timeout_stderr = (ex.stderr or "").strip()
+        detail_parts: list[str] = [str(ex)]
+        if timeout_stderr:
+            detail_parts.append(f"stderr:\n{timeout_stderr}")
+        if timeout_stdout:
+            detail_parts.append(f"stdout:\n{timeout_stdout}")
+        detail = "\n\n".join(detail_parts)[:2000]
         return (
             row_idx,
             None,
@@ -282,7 +300,7 @@ def process_row(
                 "reason": "extractdata_timeout",
                 "uuid": row.get("uuid"),
                 "proof_field": proof_field,
-                "detail": str(ex),
+                "detail": detail,
             },
         )
     except Exception as ex:
@@ -299,9 +317,14 @@ def process_row(
         )
 
     if returncode != 0:
-        detail = (stderr or stdout).strip()
-        if detail:
-            detail = detail[:1000]
+        stderr = (stderr or "").strip()
+        stdout = (stdout or "").strip()
+        detail_parts: list[str] = []
+        if stderr:
+            detail_parts.append(f"stderr:\n{stderr}")
+        if stdout:
+            detail_parts.append(f"stdout:\n{stdout}")
+        detail = "\n\n".join(detail_parts)[:2000]
         rec: dict[str, Any] = {
             "row_idx": row_idx,
             "reason": "extractdata_process_error",
