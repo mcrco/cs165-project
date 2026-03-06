@@ -36,8 +36,8 @@ if [[ -z "${GITHUB_ACCESS_TOKEN:-}" ]]; then
   elif [[ -n "${GH_TOKEN:-}" ]]; then
     export GITHUB_ACCESS_TOKEN="${GH_TOKEN}"
   else
-    # Some imports require this env var even when GitHub API is not used.
-    export GITHUB_ACCESS_TOKEN="unused-${SLURM_JOB_ID:-nojob}-${RANDOM}${RANDOM}"
+    echo "ERROR: Missing GitHub token. Set one of GITHUB_ACCESS_TOKEN, GITHUB_TOKEN, or GH_TOKEN before submitting." >&2
+    exit 1
   fi
 fi
 

@@ -10,6 +10,17 @@ RUNS_DIR="${RUNS_DIR:-logs/slurm/proof_search_runs}"
 MAX_PARALLEL="${MAX_PARALLEL:-16}"
 MODEL_TYPE="${MODEL_TYPE:-hf}"
 
+if [[ -z "${GITHUB_ACCESS_TOKEN:-}" ]]; then
+  if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    export GITHUB_ACCESS_TOKEN="${GITHUB_TOKEN}"
+  elif [[ -n "${GH_TOKEN:-}" ]]; then
+    export GITHUB_ACCESS_TOKEN="${GH_TOKEN}"
+  else
+    echo "ERROR: Missing GitHub token. Set one of GITHUB_ACCESS_TOKEN, GITHUB_TOKEN, or GH_TOKEN." >&2
+    exit 1
+  fi
+fi
+
 if [[ "$MODEL_TYPE" != "diffusion" && "$MODEL_TYPE" != "hf" ]]; then
   echo "ERROR: MODEL_TYPE must be one of: diffusion|hf (got: $MODEL_TYPE)." >&2
   exit 1
