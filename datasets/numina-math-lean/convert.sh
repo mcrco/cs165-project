@@ -57,7 +57,9 @@ for input in "${inputs[@]}"; do
   uv run python convert_numina_math_lean_to_leandojo.py \
     --input-path "${input}" \
     --output-json "${output}" \
-    --failure-log "${failure_log}"
+    --failure-log "${failure_log}" \
+    --max-examples 10000 \
+    --jobs 15
 done
 
 echo "[convert] Done at $(date -Iseconds)"
