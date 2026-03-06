@@ -23,6 +23,12 @@ fi
 REPO_DIR="${REPO_DIR:-$PWD}"
 cd "$REPO_DIR"
 
+if [[ -f "$REPO_DIR/hf_var_fixes.sh" ]]; then
+  # shellcheck disable=SC1091
+  source "$REPO_DIR/hf_var_fixes.sh"
+fi
+export UV_NATIVE_TLS="${UV_NATIVE_TLS:-1}"
+
 if [[ -f "${VENV_PATH:-.venv/bin/activate}" ]]; then
   # shellcheck disable=SC1090
   source "${VENV_PATH:-.venv/bin/activate}"
