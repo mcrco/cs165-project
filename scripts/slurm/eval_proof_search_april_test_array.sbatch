@@ -29,6 +29,18 @@ if [[ -f "$REPO_DIR/hf_var_fixes.sh" ]]; then
 fi
 export UV_NATIVE_TLS="${UV_NATIVE_TLS:-1}"
 
+# Normalize GitHub token env var names for LeanDojo codepaths.
+if [[ -z "${GITHUB_ACCESS_TOKEN:-}" ]]; then
+  if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    export GITHUB_ACCESS_TOKEN="${GITHUB_TOKEN}"
+  elif [[ -n "${GH_TOKEN:-}" ]]; then
+    export GITHUB_ACCESS_TOKEN="${GH_TOKEN}"
+  else
+    # Some imports require this env var even when GitHub API is not used.
+    export GITHUB_ACCESS_TOKEN="unused-${SLURM_JOB_ID:-nojob}-${RANDOM}${RANDOM}"
+  fi
+fi
+
 if [[ -f "${VENV_PATH:-.venv/bin/activate}" ]]; then
   # shellcheck disable=SC1090
   source "${VENV_PATH:-.venv/bin/activate}"
@@ -102,6 +114,15 @@ if [[ -n "${MAX_THEOREMS:-}" ]]; then
   cmd+=(--max-theorems "$MAX_THEOREMS")
 fi
 
+# fixes issue of cpu binding when running job submission from inside slurm allocations
+if [[ -n "${SLURM_JOB_ID:-}" ]]; then
+  IFS=' ' read -r -a srun_args <<< "${SRUN_ARGS:---cpu-bind=none}"
+  launch_cmd=(srun "${srun_args[@]}" "${cmd[@]}")
+else
+  srun_args=()
+  launch_cmd=("${cmd[@]}")
+fi
+
 {
   echo "[$(date -Is)] Starting proof search"
   echo "repo_dir=$REPO_DIR"
@@ -111,6 +132,8 @@ fi
   echo "ckpt=$CKPT"
   echo "task_id=${TASK_ID}"
   echo "job_id=${JOB_ID}"
+  echo "slurm_job_id=${SLURM_JOB_ID:-none}"
+  echo "launch_cmd=${launch_cmd[*]}"
   echo "----------------------------------------"
-  srun "${cmd[@]}"
+  "${launch_cmd[@]}"
 } | tee "$out_file"
