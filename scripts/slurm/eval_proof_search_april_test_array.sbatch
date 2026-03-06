@@ -67,14 +67,19 @@ if [[ "${#data_files[@]}" -eq 0 ]]; then
   echo "ERROR: No JSON files found in TEST_DIR=$TEST_DIR" >&2
   exit 1
 fi
-if (( SLURM_ARRAY_TASK_ID < 0 || SLURM_ARRAY_TASK_ID >= ${#data_files[@]} )); then
-  echo "ERROR: No data file for SLURM_ARRAY_TASK_ID=${SLURM_ARRAY_TASK_ID}" >&2
+
+# Support both array jobs and non-array submissions.
+TASK_ID="${SLURM_ARRAY_TASK_ID:-0}"
+JOB_ID="${SLURM_ARRAY_JOB_ID:-${SLURM_JOB_ID:-no_slurm_job_id}}"
+
+if (( TASK_ID < 0 || TASK_ID >= ${#data_files[@]} )); then
+  echo "ERROR: No data file for task_id=${TASK_ID}" >&2
   exit 1
 fi
-DATA_JSON="${data_files[$SLURM_ARRAY_TASK_ID]}"
+DATA_JSON="${data_files[$TASK_ID]}"
 
 basename_no_ext="$(basename "${DATA_JSON%.*}")"
-OUT_DIR="${OUT_DIR:-logs/proof_search/${SLURM_ARRAY_JOB_ID}}"
+OUT_DIR="${OUT_DIR:-logs/proof_search/${JOB_ID}}"
 mkdir -p "$OUT_DIR"
 out_file="${OUT_DIR}/${basename_no_ext}.summary.txt"
 
@@ -104,8 +109,8 @@ fi
   echo "data_json=$DATA_JSON"
   echo "model_type=$MODEL_TYPE"
   echo "ckpt=$CKPT"
-  echo "task_id=${SLURM_ARRAY_TASK_ID}"
-  echo "job_id=${SLURM_ARRAY_JOB_ID}"
+  echo "task_id=${TASK_ID}"
+  echo "job_id=${JOB_ID}"
   echo "----------------------------------------"
   srun "${cmd[@]}"
 } | tee "$out_file"
