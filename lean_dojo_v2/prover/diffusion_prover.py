@@ -7,10 +7,25 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from pantograph.expr import GoalState, Tactic
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from lean_dojo_v2.database.models.theorems import Theorem
 from lean_dojo_v2.prover.base_prover import BaseProver
+
+
+def _sanitize_rope_scaling(cfg):
+    rope = getattr(cfg, "rope_scaling", None)
+    if not isinstance(rope, dict):
+        return cfg
+    rope = dict(rope)
+    for key in ("factor", "beta_fast", "beta_slow"):
+        if key in rope and rope[key] is not None:
+            try:
+                rope[key] = float(rope[key])
+            except (TypeError, ValueError):
+                pass
+    cfg.rope_scaling = rope
+    return cfg
 
 
 class DiffusionProver(BaseProver):
@@ -28,10 +43,17 @@ class DiffusionProver(BaseProver):
         else:
             self.device = torch.device(device)
 
-        self.tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
+        trust_remote_code = ckpt_path == "inclusionAI/LLaDA-MoE-7B-A1B-Instruct"
+        config = _sanitize_rope_scaling(
+            AutoConfig.from_pretrained(ckpt_path, trust_remote_code=trust_remote_code)
+        )
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            ckpt_path, trust_remote_code=trust_remote_code
+        )
         self.model = AutoModelForCausalLM.from_pretrained(
-            ckpt_path, 
-            trust_remote_code=ckpt_path == "inclusionAI/LLaDA-MoE-7B-A1B-Instruct"
+            ckpt_path,
+            config=config,
+            trust_remote_code=trust_remote_code,
         ).to(self.device)
         self.mask_token_id = self.tokenizer.convert_tokens_to_ids("<|mdm_mask|>")
         if self.mask_token_id is None or self.mask_token_id < 0:

@@ -82,7 +82,7 @@ def main() -> None:
         default=DEFAULT_PROJECT_PATH,
         help=f"Lean project root for import resolution (default: {DEFAULT_PROJECT_PATH})",
     )
-    parser.add_argument("--server-timeout", type=int, default=60)
+    parser.add_argument("--server-timeout", type=int, default=300)
     parser.add_argument("--max-theorems", type=int, default=None)
     args = parser.parse_args()
 

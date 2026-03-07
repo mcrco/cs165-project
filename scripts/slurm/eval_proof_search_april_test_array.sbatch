@@ -23,11 +23,17 @@ fi
 REPO_DIR="${REPO_DIR:-$PWD}"
 cd "$REPO_DIR"
 
+# Some clusters run cache checks before Triton creates this path.
+if [[ -n "${HOME:-}" ]]; then
+  mkdir -p "${HOME}/.triton/autotune" || true
+fi
+
 if [[ -f "$REPO_DIR/hf_var_fixes.sh" ]]; then
   # shellcheck disable=SC1091
   source "$REPO_DIR/hf_var_fixes.sh"
 fi
 export UV_NATIVE_TLS="${UV_NATIVE_TLS:-1}"
+export TRANSFORMERS_VERBOSITY="${TRANSFORMERS_VERBOSITY:-error}"
 
 # Normalize GitHub token env var names for LeanDojo codepaths.
 if [[ -z "${GITHUB_ACCESS_TOKEN:-}" ]]; then
@@ -103,7 +109,7 @@ cmd=(
   --ckpt "$CKPT"
   --device "${DEVICE:-auto}"
   --project-path "${PROJECT_PATH:-datasets/april/april_eval_project}"
-  --server-timeout "${SERVER_TIMEOUT:-60}"
+  --server-timeout "${SERVER_TIMEOUT:-300}"
   --imports "${imports_arr[@]}"
 )
 

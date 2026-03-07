@@ -6,10 +6,25 @@ from typing import Optional
 import torch
 from pantograph.expr import GoalState, Tactic
 from peft import AutoPeftModelForCausalLM
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from lean_dojo_v2.database.models.theorems import Theorem
 from lean_dojo_v2.prover.base_prover import BaseProver
+
+
+def _sanitize_rope_scaling(cfg):
+    rope = getattr(cfg, "rope_scaling", None)
+    if not isinstance(rope, dict):
+        return cfg
+    rope = dict(rope)
+    for key in ("factor", "beta_fast", "beta_slow"):
+        if key in rope and rope[key] is not None:
+            try:
+                rope[key] = float(rope[key])
+            except (TypeError, ValueError):
+                pass
+    cfg.rope_scaling = rope
+    return cfg
 
 
 class HFProver(BaseProver):
@@ -27,14 +42,21 @@ class HFProver(BaseProver):
         else:
             self.device = torch.device(device)
 
-        self.tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
+        config = _sanitize_rope_scaling(
+            AutoConfig.from_pretrained(ckpt_path, trust_remote_code=True)
+        )
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            ckpt_path, trust_remote_code=True
+        )
 
         if use_lora:
-            self.model = AutoPeftModelForCausalLM.from_pretrained(ckpt_path).to(
-                self.device
-            )
+            self.model = AutoPeftModelForCausalLM.from_pretrained(
+                ckpt_path, config=config
+            ).to(self.device)
         else:
-            self.model = AutoModelForCausalLM.from_pretrained(ckpt_path).to(self.device)
+            self.model = AutoModelForCausalLM.from_pretrained(
+                ckpt_path, config=config, trust_remote_code=True
+            ).to(self.device)
 
         self.model.eval()
 
