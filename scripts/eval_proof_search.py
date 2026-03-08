@@ -11,6 +11,7 @@ import argparse
 import json
 import re
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -114,6 +115,12 @@ def main() -> None:
     )
     parser.add_argument("--server-timeout", type=int, default=300)
     parser.add_argument("--max-theorems", type=int, default=None)
+    parser.add_argument(
+        "--results-jsonl",
+        type=Path,
+        default=None,
+        help="Optional path to write per-theorem proof-search results as JSONL",
+    )
     args = parser.parse_args()
 
     data: list[dict[str, Any]] = json.loads(args.data_json.read_text(encoding="utf-8"))
@@ -133,18 +140,53 @@ def main() -> None:
     parse_failed = 0
     runtime_failed = 0
 
+    results_path: Path | None = args.results_jsonl
+    result_rows: list[dict[str, Any]] = []
+
     # Non-None sentinel so next_tactic() runs in current prover implementations.
     theorem_sentinel = object()
 
     t0 = time.time()
     for i, item in enumerate(data):
         goal = extract_goal_from_item(item)
+        name = item.get("full_name") or f"theorem_{i}"
+
         if not goal:
             parse_failed += 1
+            result_rows.append(
+                {
+                    "index": i,
+                    "attempted_index": None,
+                    "name": name,
+                    "goal": "",
+                    "status": "parse_failed",
+                    "success": False,
+                    "steps": None,
+                    "used_tactics": [],
+                    "model_tactics": [],
+                    "error": None,
+                    "elapsed_sec": None,
+                }
+            )
             continue
 
         attempted += 1
-        name = item.get("full_name") or f"theorem_{i}"
+        theorem_tactics: list[dict[str, Any]] = []
+        original_next_tactic = prover.next_tactic
+
+        def logging_next_tactic(state, goal_id):
+            tactic = original_next_tactic(state, goal_id)
+            theorem_tactics.append(
+                {
+                    "goal_id": goal_id,
+                    "goal_state": str(state),
+                    "tactic": str(tactic) if tactic is not None else None,
+                }
+            )
+            return tactic
+
+        prover.next_tactic = logging_next_tactic
+        theorem_t0 = time.time()
 
         try:
             result, used_tactics = prover.search(
@@ -160,9 +202,41 @@ def main() -> None:
                 f"[{attempted}] {name}: success={ok} "
                 f"steps={result.steps} tactics_used={len(used_tactics or [])}"
             )
+            result_rows.append(
+                {
+                    "index": i,
+                    "attempted_index": attempted,
+                    "name": name,
+                    "goal": goal,
+                    "status": "ok",
+                    "success": ok,
+                    "steps": result.steps,
+                    "used_tactics": used_tactics or [],
+                    "model_tactics": theorem_tactics,
+                    "error": None,
+                    "elapsed_sec": round(time.time() - theorem_t0, 6),
+                }
+            )
         except Exception as e:
             runtime_failed += 1
             print(f"[{attempted}] {name}: runtime_error={type(e).__name__}: {e}")
+            result_rows.append(
+                {
+                    "index": i,
+                    "attempted_index": attempted,
+                    "name": name,
+                    "goal": goal,
+                    "status": "runtime_error",
+                    "success": False,
+                    "steps": None,
+                    "used_tactics": [],
+                    "model_tactics": theorem_tactics,
+                    "error": {"type": type(e).__name__, "message": str(e)},
+                    "elapsed_sec": round(time.time() - theorem_t0, 6),
+                }
+            )
+        finally:
+            prover.next_tactic = original_next_tactic
 
     elapsed = time.time() - t0
     success_rate = (succeeded / attempted) if attempted else 0.0
@@ -176,6 +250,25 @@ def main() -> None:
     print(f"parse_failed={parse_failed}")
     print(f"runtime_failed={runtime_failed}")
     print(f"elapsed_sec={elapsed:.2f}")
+
+    if results_path is not None:
+        results_path.parent.mkdir(parents=True, exist_ok=True)
+        run_info = {
+            "run_type": "proof_search_eval",
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+            "model_type": args.model_type,
+            "ckpt": args.ckpt,
+            "data_json": str(args.data_json),
+            "project_path": str(args.project_path),
+            "imports": args.imports,
+            "server_timeout": args.server_timeout,
+            "max_theorems": args.max_theorems,
+        }
+        with results_path.open("w", encoding="utf-8") as f:
+            f.write(json.dumps({"meta": run_info}, ensure_ascii=False) + "\n")
+            for row in result_rows:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        print(f"results_jsonl={results_path}")
 
 
 if __name__ == "__main__":
