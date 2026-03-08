@@ -28,6 +28,25 @@ if [[ -f "${VENV_PATH:-.venv/bin/activate}" ]]; then
   source "${VENV_PATH:-.venv/bin/activate}"
 fi
 
+# Load project secrets/tokens when available.
+if [[ -f "${ENV_FILE:-.env}" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "${ENV_FILE:-.env}"
+  set +a
+fi
+
+# Reduce certificate-related HF failures on shared HPC environments.
+if command -v python >/dev/null 2>&1; then
+  CERT_PATH="$(python -c 'import certifi; print(certifi.where())' 2>/dev/null || true)"
+  if [[ -n "${CERT_PATH}" ]]; then
+    export SSL_CERT_FILE="${SSL_CERT_FILE:-$CERT_PATH}"
+    export REQUESTS_CA_BUNDLE="${REQUESTS_CA_BUNDLE:-$CERT_PATH}"
+    export CURL_CA_BUNDLE="${CURL_CA_BUNDLE:-$CERT_PATH}"
+  fi
+fi
+export HF_HUB_DISABLE_XET="${HF_HUB_DISABLE_XET:-1}"
+
 if [[ -z "${FILELIST:-}" ]]; then
   echo "ERROR: FILELIST env var is required." >&2
   exit 1
@@ -66,16 +85,29 @@ mkdir -p "$OUT_DIR"
 out_file="${OUT_DIR}/${basename_no_ext}.summary.txt"
 
 IFS=' ' read -r -a imports_arr <<< "${IMPORTS:-Init Mathlib}"
-cmd=(
-  uv run python scripts/eval_proof_search.py
-  --data-json "$DATA_JSON"
-  --model-type "$MODEL_TYPE"
-  --ckpt "$CKPT"
-  --device "${DEVICE:-auto}"
-  --project-path "${PROJECT_PATH:-datasets/april/april_eval_project}"
-  --server-timeout "${SERVER_TIMEOUT:-60}"
-  --imports "${imports_arr[@]}"
-)
+if command -v uv >/dev/null 2>&1; then
+  cmd=(
+    uv run python scripts/eval_proof_search.py
+    --data-json "$DATA_JSON"
+    --model-type "$MODEL_TYPE"
+    --ckpt "$CKPT"
+    --device "${DEVICE:-auto}"
+    --project-path "${PROJECT_PATH:-datasets/april/april_eval_project}"
+    --server-timeout "${SERVER_TIMEOUT:-60}"
+    --imports "${imports_arr[@]}"
+  )
+else
+  cmd=(
+    python scripts/eval_proof_search.py
+    --data-json "$DATA_JSON"
+    --model-type "$MODEL_TYPE"
+    --ckpt "$CKPT"
+    --device "${DEVICE:-auto}"
+    --project-path "${PROJECT_PATH:-datasets/april/april_eval_project}"
+    --server-timeout "${SERVER_TIMEOUT:-60}"
+    --imports "${imports_arr[@]}"
+  )
+fi
 
 if [[ "${USE_LORA:-0}" == "1" ]]; then
   cmd+=(--use-lora)

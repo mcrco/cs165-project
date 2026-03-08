@@ -30,7 +30,8 @@ for input in raw/*/*.jsonl; do
   uv run python convert_april_to_leandojo.py \
     --input-jsonl "${input}" \
     --output-json "${output}" \
-    --failure-log "${failure_log}"
+    --failure-log "${failure_log}" \
+    --jobs 32
 done
 
 echo "[convert] Done at $(date -Iseconds)"

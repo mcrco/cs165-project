@@ -30,11 +30,23 @@ class HFProver(BaseProver):
         self.tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
 
         if use_lora:
-            self.model = AutoPeftModelForCausalLM.from_pretrained(ckpt_path).to(
-                self.device
-            )
+            try:
+                self.model = AutoPeftModelForCausalLM.from_pretrained(
+                    ckpt_path, use_safetensors=True
+                ).to(self.device)
+            except Exception:
+                self.model = AutoPeftModelForCausalLM.from_pretrained(ckpt_path).to(
+                    self.device
+                )
         else:
-            self.model = AutoModelForCausalLM.from_pretrained(ckpt_path).to(self.device)
+            try:
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    ckpt_path, use_safetensors=True
+                ).to(self.device)
+            except Exception:
+                self.model = AutoModelForCausalLM.from_pretrained(ckpt_path).to(
+                    self.device
+                )
 
         self.model.eval()
 
