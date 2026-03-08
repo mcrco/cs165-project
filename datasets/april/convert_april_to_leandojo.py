@@ -84,7 +84,7 @@ def infer_full_name(row: dict[str, Any], idx: int) -> str:
 
     code = row.get("correct_proof", "")
     if isinstance(code, str):
-        m = re.search(r"\\b(?:theorem|lemma)\\s+([A-Za-z0-9_'.]+)", code)
+        m = re.search(r"\b(?:theorem|lemma)\s+([A-Za-z0-9_'.]+)", code)
         if m:
             return m.group(1)
 
@@ -93,12 +93,12 @@ def infer_full_name(row: dict[str, Any], idx: int) -> str:
 
 def infer_statement(code: str) -> str:
     m = re.search(
-        r"\\b(?:theorem|lemma)\\s+[A-Za-z0-9_'.]+\\s*(.*?)\\s*:=\\s*by",
+        r"\b(?:theorem|lemma)\s+[A-Za-z0-9_'.]+\s*(.*?)\s*:=\s*by",
         code,
         flags=re.DOTALL,
     )
     if m:
-        return re.sub(r"\\s+", " ", m.group(1)).strip()
+        return re.sub(r"\s+", " ", m.group(1)).strip()
     return ""
 
 

@@ -27,6 +27,14 @@ for input in raw/*/*.jsonl; do
   mkdir -p "$(dirname "${output}")" "$(dirname "${failure_log}")"
 
   echo "[convert] ${input} -> ${output}"
+  if [[ "${MATERIALIZE_REPO:-0}" == "1" ]]; then
+    manifest="leandojo/materialized/${split}/${stem}.manifest.jsonl"
+    mkdir -p "$(dirname "${manifest}")"
+    echo "[materialize] ${input} -> ${manifest}"
+    uv run python materialize_april_repo.py \
+      --input-jsonl "${input}" \
+      --manifest-path "${manifest}"
+  fi
   uv run python convert_april_to_leandojo.py \
     --input-jsonl "${input}" \
     --output-json "${output}" \

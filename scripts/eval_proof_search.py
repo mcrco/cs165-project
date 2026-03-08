@@ -44,6 +44,36 @@ def extract_goal_expr(theorem_statement: str) -> str:
     return s
 
 
+def extract_goal_from_state(state: str) -> str:
+    s = (state or "").strip()
+    if not s:
+        return ""
+    for line in reversed(s.splitlines()):
+        line = line.strip()
+        if line.startswith("⊢"):
+            return line[1:].strip()
+    return ""
+
+
+def extract_goal_from_item(item: dict[str, Any]) -> str:
+    # Primary path: theorem statement text.
+    goal = extract_goal_expr(item.get("theorem_statement") or "")
+    if goal:
+        return goal
+
+    # APRIL-style fallback: first traced tactic usually carries state_before with a goal line.
+    traced = item.get("traced_tactics")
+    if isinstance(traced, list):
+        for step in traced:
+            if not isinstance(step, dict):
+                continue
+            goal = extract_goal_from_state(step.get("state_before") or "")
+            if goal:
+                return goal
+
+    return ""
+
+
 def build_prover(model_type: str, ckpt: str, device: str, use_lora: bool):
     if model_type == "diffusion":
         return DiffusionProver(ckpt_path=ckpt, device=device)
@@ -108,7 +138,7 @@ def main() -> None:
 
     t0 = time.time()
     for i, item in enumerate(data):
-        goal = extract_goal_expr(item.get("theorem_statement") or "")
+        goal = extract_goal_from_item(item)
         if not goal:
             parse_failed += 1
             continue

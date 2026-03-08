@@ -54,6 +54,15 @@ for input in "${inputs[@]}"; do
   mkdir -p "$(dirname "${output}")" "$(dirname "${failure_log}")"
 
   echo "[convert] ${input} -> ${output}"
+  if [[ "${MATERIALIZE_REPO:-0}" == "1" ]]; then
+    manifest="leandojo/materialized/${stem}.manifest.jsonl"
+    mkdir -p "$(dirname "${manifest}")"
+    echo "[materialize] ${input} -> ${manifest}"
+    uv run python materialize_numina_math_lean_repo.py \
+      --input-path "${input}" \
+      --manifest-path "${manifest}" \
+      --max-examples 10000
+  fi
   uv run python convert_numina_math_lean_to_leandojo.py \
     --input-path "${input}" \
     --output-json "${output}" \
