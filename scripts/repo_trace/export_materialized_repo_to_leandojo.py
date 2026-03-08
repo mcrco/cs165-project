@@ -8,8 +8,9 @@ import json
 from pathlib import Path
 from typing import Any
 
-from lean_dojo_v2.lean_dojo.data_extraction.lean import LEAN4_PACKAGES_DIR, LeanGitRepo
+from lean_dojo_v2.lean_dojo.data_extraction.lean import LeanGitRepo
 from lean_dojo_v2.lean_dojo.data_extraction.trace import trace
+from lean_dojo_v2.utils.constants import LEAN4_PACKAGES_DIR
 
 
 def _file_path_for_theorem(traced_repo, theorem) -> str:
