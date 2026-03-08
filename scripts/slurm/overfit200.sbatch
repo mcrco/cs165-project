@@ -6,7 +6,7 @@
 #SBATCH --gres=gpu:nvidia_h200:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=80G
-#SBATCH --time=04:00:00
+#SBATCH --time=06:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 
@@ -22,6 +22,7 @@ module purge
 module load cuda/12.2.1-gcc-11.3.1-sdqrj2e git/2.39.3-gcc-11.3.1-zfr3sti
 
 source "$PROJECT_DIR/.venv/bin/activate"
+export PYTHONPATH="$PROJECT_DIR:${PYTHONPATH:-}"
 export PATH="$HOME/.elan/bin:$PATH"
 
 if [[ -f "${ENV_FILE:-.env}" ]]; then
