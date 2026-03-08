@@ -17,12 +17,23 @@ from lean_dojo_v2.utils import remove_marks
 
 
 class DiffusionSFTDataset:
-    """Builds next-tactic SFT examples for diffusion-style training."""
+    """Builds next-tactic SFT examples for diffusion-style training.
 
-    def __init__(self, data_path: str, tokenizer, max_length: int = 1024):
+    Each example is: [prompt tokens] + [tactic tokens] + [EOS] + [mask padding to gen_length].
+    The generation region (from assistant_start) is always exactly gen_length tokens,
+    matching the inference-time sequence shape.
+    """
+
+    def __init__(self, data_path: str, tokenizer, max_length: int = 1024,
+                 gen_length: int = 64):
         self.data_path = data_path
         self.tokenizer = tokenizer
         self.max_length = max_length
+        self.gen_length = gen_length
+
+        self.mask_token_id = tokenizer.convert_tokens_to_ids("<|mdm_mask|>")
+        if self.mask_token_id is None or self.mask_token_id < 0:
+            self.mask_token_id = 156895
 
         with open(data_path, encoding="utf-8") as f:
             self.json_data = json.load(f)
@@ -49,6 +60,8 @@ class DiffusionSFTDataset:
 
     def _process_data(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         processed: List[Dict[str, Any]] = []
+        eos_id = self.tokenizer.eos_token_id
+
         for item in data:
             for tactic in item.get("traced_tactics", []):
                 tactic_text = (
@@ -59,7 +72,6 @@ class DiffusionSFTDataset:
 
                 goal_state = remove_marks(tactic["state_before"]).strip()
                 prompt_prefix = self._make_prompt_prefix(goal_state)
-                full_text = prompt_prefix + tactic_text
 
                 prompt_ids = self.tokenizer(
                     prompt_prefix,
@@ -67,21 +79,28 @@ class DiffusionSFTDataset:
                     truncation=True,
                     max_length=self.max_length,
                 )["input_ids"]
-                full_ids = self.tokenizer(
-                    full_text,
+
+                tactic_ids = self.tokenizer(
+                    tactic_text,
                     add_special_tokens=False,
-                    truncation=True,
-                    max_length=self.max_length,
                 )["input_ids"]
 
-                assistant_start = min(len(prompt_ids), len(full_ids))
-                if assistant_start >= len(full_ids):
+                tactic_plus_eos = tactic_ids + [eos_id]
+
+                if len(tactic_plus_eos) > self.gen_length:
+                    continue
+
+                n_mask_pad = self.gen_length - len(tactic_plus_eos)
+                gen_region = tactic_plus_eos + [self.mask_token_id] * n_mask_pad
+
+                full_ids = prompt_ids + gen_region
+                if len(full_ids) > self.max_length:
                     continue
 
                 processed.append(
                     {
                         "input_ids": full_ids,
-                        "assistant_start": assistant_start,
+                        "assistant_start": len(prompt_ids),
                     }
                 )
 
@@ -101,8 +120,8 @@ class DiffusionDataCollator:
         self,
         tokenizer,
         mask_token_id: int,
-        min_mask_ratio: float = 0.15,
-        max_mask_ratio: float = 0.60,
+        min_mask_ratio: float = 0.01,
+        max_mask_ratio: float = 1.0,
     ):
         if not (0.0 < min_mask_ratio <= max_mask_ratio <= 1.0):
             raise ValueError("Mask ratios must satisfy 0 < min <= max <= 1")
@@ -135,22 +154,33 @@ class DiffusionDataCollator:
             if assistant_start >= seq_len:
                 continue
 
-            candidate_positions = torch.arange(
-                assistant_start, seq_len, dtype=torch.long
-            )
-            if candidate_positions.numel() == 0:
-                continue
+            # The generation region includes tactic + EOS + mask padding.
+            # Positions that are already mask_token_id (padding) always get
+            # masked and trained; for real tactic+EOS tokens, sample a ratio.
+            real_positions = []
+            pad_positions = []
+            for pos in range(assistant_start, seq_len):
+                if ids[pos].item() == self.mask_token_id:
+                    pad_positions.append(pos)
+                else:
+                    real_positions.append(pos)
 
-            mask_ratio = (
-                torch.empty(1).uniform_(self.min_mask_ratio, self.max_mask_ratio).item()
-            )
-            num_to_mask = max(1, int(round(candidate_positions.numel() * mask_ratio)))
-            chosen = candidate_positions[
-                torch.randperm(candidate_positions.numel())[:num_to_mask]
-            ]
+            # Always mask and train on the pad region so the model learns to
+            # produce mask/pad tokens after the tactic ends.
+            for pos in pad_positions:
+                labels[i, pos] = ids[pos]
 
-            input_ids[i, chosen] = self.mask_token_id
-            labels[i, chosen] = ids[chosen]
+            if real_positions:
+                real_positions = torch.tensor(real_positions, dtype=torch.long)
+                mask_ratio = (
+                    torch.empty(1).uniform_(self.min_mask_ratio, self.max_mask_ratio).item()
+                )
+                num_to_mask = max(1, int(round(real_positions.numel() * mask_ratio)))
+                chosen = real_positions[
+                    torch.randperm(real_positions.numel())[:num_to_mask]
+                ]
+                input_ids[i, chosen] = self.mask_token_id
+                labels[i, chosen] = ids[chosen]
 
         return {
             "input_ids": input_ids,
@@ -188,8 +218,8 @@ class DiffusionSFTTrainer:
         batch_size: int = 1,
         lr: float = 2e-5,
         max_length: int = 1024,
-        min_mask_ratio: float = 0.15,
-        max_mask_ratio: float = 0.60,
+        min_mask_ratio: float = 0.01,
+        max_mask_ratio: float = 1.0,
         lora_config: Optional[LoraConfig] = None,
     ):
         self.model_name = model_name

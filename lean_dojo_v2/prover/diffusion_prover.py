@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from pantograph.expr import GoalState, Tactic
+from peft import AutoPeftModelForCausalLM
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from lean_dojo_v2.database.models.theorems import Theorem
@@ -50,14 +51,17 @@ class DiffusionProver(BaseProver):
         self.tokenizer = AutoTokenizer.from_pretrained(
             ckpt_path, trust_remote_code=trust_remote_code
         )
-        self.model = AutoModelForCausalLM.from_pretrained(
-            ckpt_path,
-            config=config,
-            trust_remote_code=trust_remote_code,
-        ).to(self.device)
+
+        if use_lora:
+            self.model = AutoPeftModelForCausalLM.from_pretrained(
+                ckpt_path, config=config, trust_remote_code=trust_remote_code
+            ).to(self.device)
+        else:
+            self.model = AutoModelForCausalLM.from_pretrained(
+                ckpt_path, config=config, trust_remote_code=trust_remote_code
+            ).to(self.device)
         self.mask_token_id = self.tokenizer.convert_tokens_to_ids("<|mdm_mask|>")
         if self.mask_token_id is None or self.mask_token_id < 0:
-            # LLaDA mask token id (https://huggingface.co/inclusionAI/LLaDA-MoE-7B-A1B-Instruct)
             self.mask_token_id = 156895
 
         self.model.eval()
@@ -89,7 +93,7 @@ class DiffusionProver(BaseProver):
                 gen_length=64,
                 num_return_sequences=5,
                 steps=128,
-                block_length=32,
+                block_length=64,
                 temperature=0.7,
                 cfg_scale=0.0,
                 remasking="low_confidence",
@@ -104,7 +108,7 @@ class DiffusionProver(BaseProver):
         if not tactics:
             return None
 
-        return random.choice(tactics)
+        return tactics[0]
 
     def generate_whole_proof(self, theorem: Theorem) -> str:
         self.theorem = theorem
@@ -177,7 +181,18 @@ class DiffusionProver(BaseProver):
             mask_id=self.mask_token_id,
         )
         generated_only = sampled_ids[:, prompt_ids.shape[1] :]
-        return self.tokenizer.batch_decode(generated_only, skip_special_tokens=True)
+
+        results = []
+        eos_id = self.tokenizer.eos_token_id
+        for seq in generated_only:
+            eos_positions = (seq == eos_id).nonzero(as_tuple=True)[0]
+            if eos_positions.numel() > 0:
+                seq = seq[:eos_positions[0]]
+            mask_positions = (seq == self.mask_token_id).nonzero(as_tuple=True)[0]
+            if mask_positions.numel() > 0:
+                seq = seq[:mask_positions[0]]
+            results.append(self.tokenizer.decode(seq, skip_special_tokens=True))
+        return results
 
 
 # Helpers for diffusion language models
