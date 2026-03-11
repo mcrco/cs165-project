@@ -31,17 +31,16 @@ echo "[convert-repo] Starting Numina materialize+trace conversion at $(date -Ise
 OUT_ROOT="${OUT_ROOT:-leandojo_repo}"
 mkdir -p "${OUT_ROOT}" "${OUT_ROOT}/failures"
 
-TMP_BASE="${TMP_BASE:-/tmp}"
-RUN_DIR="$(mktemp -d "${TMP_BASE%/}/numina_repo_trace.XXXXXX")"
-cleanup() {
-  rm -rf "${RUN_DIR}"
-}
-trap cleanup EXIT
-
-WORK_REPO="${RUN_DIR}/numina_math_lean_eval_project"
-git clone -q "${SCRIPT_DIR}/numina_math_lean_eval_project" "${WORK_REPO}"
+WORK_REPO="${WORK_REPO:-${OUT_ROOT}/numina_math_lean_eval_project}"
+if [[ ! -d "${WORK_REPO}/.git" ]]; then
+  mkdir -p "$(dirname "${WORK_REPO}")"
+  rm -rf "${WORK_REPO}"
+  git clone -q "${SCRIPT_DIR}/numina_math_lean_eval_project" "${WORK_REPO}"
+fi
 git -C "${WORK_REPO}" config user.email "materializer@local"
 git -C "${WORK_REPO}" config user.name "Materializer"
+
+TRACE_BUILD_DEPS="${TRACE_BUILD_DEPS:-1}"
 
 mapfile -t inputs < <(find raw -type f \( -name '*.parquet' -o -name '*.jsonl' \) | sort)
 
@@ -87,11 +86,17 @@ for input in "${inputs[@]}"; do
   fi
   git -C "${WORK_REPO}" commit -q -m "materialize ${stem}"
 
-  if ! uv run python "${REPO_DIR}/scripts/repo_trace/export_materialized_repo_to_leandojo.py" \
-    --project-path "${WORK_REPO}" \
-    --module-prefix "NuminaMathLeanEval.Materialized" \
-    --dataset-url "https://huggingface.co/datasets/AI-MO/NuminaMath-LEAN" \
-    --output-json "${output}" ; then
+  export_cmd=(
+    uv run python "${REPO_DIR}/scripts/repo_trace/export_materialized_repo_to_leandojo.py"
+    --project-path "${WORK_REPO}"
+    --module-prefix "NuminaMathLeanEval.Materialized"
+    --dataset-url "https://huggingface.co/datasets/AI-MO/NuminaMath-LEAN"
+    --output-json "${output}"
+  )
+  if [[ "${TRACE_BUILD_DEPS}" != "0" ]]; then
+    export_cmd+=(--build-deps)
+  fi
+  if ! "${export_cmd[@]}"; then
     echo "{\"reason\":\"trace_or_export_failed\",\"input\":\"${input}\"}" > "${failure_log}"
   fi
 done
