@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -p expansion
-#SBATCH --time=24:00:00
+#SBATCH --time=12:00:00
 #SBATCH -c 16
 #SBATCH --mem=64G
 
@@ -26,19 +26,19 @@ fi
 REPO_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${SCRIPT_DIR}"
 
-echo "[convert-repo] Starting Numina materialize+trace conversion at $(date -Iseconds)"
+echo "[convert-repo] Starting Numina trace conversion at $(date -Iseconds)"
 
 OUT_ROOT="${OUT_ROOT:-leandojo_repo}"
 mkdir -p "${OUT_ROOT}" "${OUT_ROOT}/failures"
 
 WORK_REPO="${WORK_REPO:-${OUT_ROOT}/numina_math_lean_eval_project}"
-if [[ ! -d "${WORK_REPO}/.git" ]]; then
-  mkdir -p "$(dirname "${WORK_REPO}")"
-  rm -rf "${WORK_REPO}"
-  git clone -q "${SCRIPT_DIR}/numina_math_lean_eval_project" "${WORK_REPO}"
+WORK_REPO="$(python -c 'import os,sys; print(os.path.abspath(sys.argv[1]))' "${WORK_REPO}")"
+if [[ ! -e "${WORK_REPO}/.git" ]]; then
+  echo "[convert-repo] WORK_REPO is not a git repository: ${WORK_REPO}"
+  echo "[convert-repo] Run materialize-repo.sh first to set up the materialized repository."
+  exit 1
 fi
-git -C "${WORK_REPO}" config user.email "materializer@local"
-git -C "${WORK_REPO}" config user.name "Materializer"
+echo "[convert-repo] Using WORK_REPO=${WORK_REPO}"
 
 TRACE_BUILD_DEPS="${TRACE_BUILD_DEPS:-1}"
 
@@ -56,35 +56,11 @@ for input in "${inputs[@]}"; do
   stem="${rel%.${ext}}"
 
   output="${OUT_ROOT}/${stem}.json"
-  manifest="${OUT_ROOT}/materialized/${stem}.manifest.jsonl"
   failure_log="${OUT_ROOT}/failures/${stem}.failures.jsonl"
 
-  mkdir -p "$(dirname "${output}")" "$(dirname "${manifest}")" "$(dirname "${failure_log}")"
+  mkdir -p "$(dirname "${output}")"
 
-  echo "[convert-repo] ${input} -> ${output}"
-
-  git -C "${WORK_REPO}" reset --hard -q
-  git -C "${WORK_REPO}" clean -fdq
-
-  materialize_cmd=(
-    uv run python materialize_numina_math_lean_repo.py
-    --input-path "${input}"
-    --project-path "${WORK_REPO}"
-    --manifest-path "${manifest}"
-    --proof-fields "${PROOF_FIELDS:-formal_ground_truth,formal_proof}"
-  )
-  if [[ -n "${MAX_EXAMPLES:-}" ]]; then
-    materialize_cmd+=(--max-examples "${MAX_EXAMPLES}")
-  fi
-  "${materialize_cmd[@]}"
-
-  git -C "${WORK_REPO}" add -A
-  if git -C "${WORK_REPO}" diff --cached --quiet; then
-    echo "[convert-repo] no materialized changes for ${input}, skipping trace"
-    echo '{"reason":"no_materialized_changes"}' > "${failure_log}"
-    continue
-  fi
-  git -C "${WORK_REPO}" commit -q -m "materialize ${stem}"
+  echo "[convert-repo] ${stem} -> ${output}"
 
   export_cmd=(
     uv run python "${REPO_DIR}/scripts/repo_trace/export_materialized_repo_to_leandojo.py"
