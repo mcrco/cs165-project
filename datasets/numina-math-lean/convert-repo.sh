@@ -6,21 +6,27 @@
 
 set -euo pipefail
 
-if [[ -n "${NUMINA_MATH_LEAN_DIR:-}" ]]; then
+# Determine the script's location. When running via sbatch, BASH_SOURCE[0]
+# points to a copy in /var/spool/slurmd/, so use SLURM_SUBMIT_DIR instead.
+if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+  SCRIPT_DIR="${SLURM_SUBMIT_DIR}"
+elif [[ -n "${NUMINA_MATH_LEAN_DIR:-}" ]]; then
   SCRIPT_DIR="$(cd "${NUMINA_MATH_LEAN_DIR}" && pwd)"
 else
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fi
 
 REPO_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-cd "${SCRIPT_DIR}"
 
+# Cache/tmp directories default to the script directory (override with env vars)
 CACHE_DIR="${CACHE_DIR:-${SCRIPT_DIR}/.cache/lean_dojo}"
 TMP_DIR="${TMP_DIR:-${SCRIPT_DIR}/.tmp}"
 export CACHE_DIR TMP_DIR
 mkdir -p "${CACHE_DIR}" "${TMP_DIR}"
 echo "[convert-repo] CACHE_DIR=${CACHE_DIR}"
 echo "[convert-repo] TMP_DIR=${TMP_DIR}"
+
+cd "${SCRIPT_DIR}"
 
 if [[ -z "${WORK_REPO:-}" ]]; then
   echo "[convert-repo] ERROR: WORK_REPO must be specified."
