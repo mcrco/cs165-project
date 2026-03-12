@@ -60,7 +60,7 @@ for input in raw/*/*.jsonl; do
   fi
   git -C "${WORK_REPO}" commit -q -m "materialize ${split}/${stem}"
 
-  if ! uv run python "${REPO_DIR}/scripts/repo_trace/export_materialized_repo_to_leandojo.py" \
+  if ! uv run python "${REPO_DIR}/datasets/export_materialized_repo_to_leandojo.py" \
     --project-path "${WORK_REPO}" \
     --module-prefix "AprilEval.Materialized" \
     --dataset-url "https://huggingface.co/datasets/uw-math-ai/APRIL" \
