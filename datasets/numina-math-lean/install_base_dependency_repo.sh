@@ -89,4 +89,13 @@ echo "[setup] Downloading mathlib cache (if available)..."
   lake exe cache get
 )
 
+echo "[setup] Committing template files to git..."
+(
+  cd "$TARGET_DIR"
+  git add -A
+  if ! git diff --cached --quiet; then
+    git commit -q -m "Initial NuminaMathRepo template with mathlib v4.27.0"
+  fi
+)
+
 echo "[done] NuminaMathRepo ready at $TARGET_DIR"
