@@ -87,4 +87,12 @@ else
   echo "[materialize-repo] Committed all materialized changes"
 fi
 
+echo "[materialize-repo] Building materialized library..."
+(
+  cd "${WORK_REPO}"
+  lake update
+  lake exe cache get || true
+  lake build NuminaMathRepo
+)
+
 echo "[materialize-repo] Done at $(date -Iseconds)"
