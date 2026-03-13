@@ -2,20 +2,20 @@
 set -euo pipefail
 
 # Create a Lean project configured with mathlib for NuminaMath-LEAN conversion.
-# Default install location: datasets/numina-math-lean/numina_math_lean_eval_project
+# Default install location: datasets/numina-math-lean/base_dependency_repo
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-TARGET_DIR="${SCRIPT_DIR}/numina_math_lean_eval_project"
+TARGET_DIR="${SCRIPT_DIR}/base_dependency_repo"
 LEAN_TOOLCHAIN="leanprover/lean4:v4.27.0"
 MATHLIB_TAG="v4.27.0"
 
 usage() {
   cat <<'EOF'
-Usage: install_numina_math_lean_eval_project.sh [--target-dir DIR]
+Usage: install_base_dependency_project.sh [--target-dir DIR]
 
 Options:
   --target-dir DIR   Where to create/use the Lean project.
-                     Default: datasets/numina-math-lean/numina_math_lean_eval_project
+                     Default: datasets/numina-math-lean/base_dependency_repo
   -h, --help         Show this help text.
 EOF
 }
@@ -56,7 +56,7 @@ if [[ ! -f "$TARGET_DIR/lakefile.lean" ]]; then
   echo "[setup] Initializing Lean project at: $TARGET_DIR"
   (
     cd "$TARGET_DIR"
-    lake init NuminaMathLeanEval
+    lake init NuminaMathRepo
   )
 fi
 
@@ -64,12 +64,12 @@ cat > "$TARGET_DIR/lakefile.lean" <<EOF
 import Lake
 open Lake DSL
 
-package «NuminaMathLeanEval»
+package «NuminaMathRepo»
 
 require mathlib from git
   "https://github.com/leanprover-community/mathlib4.git" @ "$MATHLIB_TAG"
 
-lean_lib «NuminaMathLeanEval»
+lean_lib «NuminaMathRepo»
 EOF
 
 # Keep Lean/mathlib at v4.27.0 so ExtractData.lean stays compatible.
@@ -89,6 +89,4 @@ echo "[setup] Downloading mathlib cache (if available)..."
   lake exe cache get
 )
 
-echo "[done] NuminaMath-LEAN eval project ready."
-echo "Use this in conversion scripts:"
-echo "  --project-path $TARGET_DIR"
+echo "[done] NuminaMathRepo ready at $TARGET_DIR"

@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH -p expansion
-#SBATCH --time=2:00:00
+#SBATCH --time=3:00:00
 #SBATCH -c 32
-#SBATCH --mem=64G
+#SBATCH --mem=32G
 
 set -euo pipefail
 
@@ -10,8 +10,6 @@ set -euo pipefail
 # points to a copy in /var/spool/slurmd/, so use SLURM_SUBMIT_DIR instead.
 if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
   SCRIPT_DIR="${SLURM_SUBMIT_DIR}"
-elif [[ -n "${NUMINA_MATH_LEAN_DIR:-}" ]]; then
-  SCRIPT_DIR="$(cd "${NUMINA_MATH_LEAN_DIR}" && pwd)"
 else
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fi
@@ -19,6 +17,7 @@ fi
 REPO_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 # Cache/tmp directories default to the script directory (override with env vars)
+# Otherwise it uses default home dir which has a quota on Caltech HPC.
 CACHE_DIR="${CACHE_DIR:-${SCRIPT_DIR}/.cache/lean_dojo}"
 TMP_DIR="${TMP_DIR:-${SCRIPT_DIR}/.tmp}"
 export CACHE_DIR TMP_DIR
@@ -28,13 +27,7 @@ echo "[convert-repo] TMP_DIR=${TMP_DIR}"
 
 cd "${SCRIPT_DIR}"
 
-if [[ -z "${WORK_REPO:-}" ]]; then
-  echo "[convert-repo] ERROR: WORK_REPO must be specified."
-  echo "[convert-repo] Usage: WORK_REPO=/path/to/materialized/repo ./convert-repo.sh"
-  exit 1
-fi
-
-WORK_REPO="$(python -c 'import os,sys; print(os.path.abspath(sys.argv[1]))' "${WORK_REPO}")"
+WORK_REPO="${SCRIPT_DIR}/numina_math_repo"
 
 if [[ ! -e "${WORK_REPO}/.git" ]]; then
   echo "[convert-repo] ERROR: WORK_REPO is not a git repository: ${WORK_REPO}"
@@ -50,12 +43,13 @@ echo "[convert-repo] Output will be written to: ${OUTPUT_JSON}"
 
 mkdir -p "$(dirname "${OUTPUT_JSON}")"
 
+# Useless unless we are doing retrieval tasks.
 TRACE_BUILD_DEPS="${TRACE_BUILD_DEPS:-0}"
 
 export_cmd=(
   uv run python "${REPO_DIR}/datasets/export_materialized_repo_to_leandojo.py"
   --project-path "${WORK_REPO}"
-  --module-prefix "NuminaMathLeanEval.Materialized"
+  --module-prefix "NuminaMathRepo.Materialized"
   --dataset-url "https://huggingface.co/datasets/AI-MO/NuminaMath-LEAN"
   --output-json "${OUTPUT_JSON}"
 )

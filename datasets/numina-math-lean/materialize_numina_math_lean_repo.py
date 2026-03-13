@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Materialize NuminaMath-LEAN rows into a Lean repo module tree."""
 
 from __future__ import annotations
@@ -13,12 +12,11 @@ from datasets import load_dataset
 DEFAULT_DATASET_URL = "https://huggingface.co/datasets/AI-MO/NuminaMath-LEAN"
 NUMINA_DIR = Path(__file__).resolve().parent
 DEFAULT_INPUT_PATH = NUMINA_DIR / "raw"
-DEFAULT_PROJECT_PATH = NUMINA_DIR / "numina_math_lean_eval_project"
-DEFAULT_MODULE_PREFIX = "NuminaMathLeanEval.Materialized"
+DEFAULT_PROJECT_PATH = NUMINA_DIR / "numina_math_repo"
+DEFAULT_MODULE_PREFIX = "NuminaMathRepo.Materialized"
 DEFAULT_MANIFEST_PATH = (
     NUMINA_DIR / "leandojo" / "materialized" / "numina_manifest.jsonl"
 )
-DEFAULT_PROOF_FIELDS = ["formal_ground_truth", "formal_proof"]
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -61,23 +59,6 @@ def load_rows(input_path: Path) -> list[dict[str, Any]]:
     raise FileNotFoundError(
         f"No parquet/jsonl files found under input directory: {input_path}"
     )
-
-
-def parse_proof_fields(raw: str) -> list[str]:
-    fields = [part.strip() for part in raw.split(",") if part.strip()]
-    if not fields:
-        raise ValueError("--proof-fields must contain at least one field")
-    return fields
-
-
-def select_proof(
-    row: dict[str, Any], proof_fields: list[str]
-) -> tuple[str | None, str]:
-    for field in proof_fields:
-        val = row.get(field)
-        if isinstance(val, str) and val.strip():
-            return field, val
-    return None, ""
 
 
 def module_prefix_to_path(prefix: str) -> Path:
@@ -126,15 +107,6 @@ def main() -> None:
         help=f"JSONL manifest output path (default: {DEFAULT_MANIFEST_PATH})",
     )
     parser.add_argument(
-        "--proof-fields",
-        type=str,
-        default=",".join(DEFAULT_PROOF_FIELDS),
-        help=(
-            "Comma-separated proof fields to try in order "
-            f"(default: {','.join(DEFAULT_PROOF_FIELDS)})"
-        ),
-    )
-    parser.add_argument(
         "--max-examples",
         type=int,
         default=None,
@@ -145,7 +117,6 @@ def main() -> None:
     rows = load_rows(args.input_path)
     if args.max_examples is not None:
         rows = rows[: args.max_examples]
-    proof_fields = parse_proof_fields(args.proof_fields)
 
     if not args.project_path.is_dir():
         raise FileNotFoundError(f"Project path does not exist: {args.project_path}")
@@ -164,8 +135,8 @@ def main() -> None:
     skipped = 0
 
     for row_idx, row in enumerate(rows):
-        proof_field, code = select_proof(row, proof_fields)
-        if not code:
+        code = row.get("formal_ground_truth")
+        if not isinstance(code, str) or not code.strip():
             skipped += 1
             continue
 
@@ -182,7 +153,6 @@ def main() -> None:
                 "source_url": DEFAULT_DATASET_URL,
                 "uuid": row.get("uuid"),
                 "source": row.get("source"),
-                "proof_field": proof_field,
             }
         )
 

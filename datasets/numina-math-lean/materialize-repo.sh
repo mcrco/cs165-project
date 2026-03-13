@@ -4,47 +4,35 @@
 #SBATCH -c 16
 #SBATCH --mem=64G
 
-# Clones the numina math lean eval project into a new repo, then adds each of the proofs
+# Copies base_dependency_repo into numina_math_repo, then adds each of the proofs
 # in numina math as its own file in the new repo.
-# Defaults to datasets/numina-math-lean/leandojo_repo/numina_math_lean_eval_project.
 
 set -euo pipefail
 
-if [[ -n "${NUMINA_MATH_LEAN_DIR:-}" ]]; then
-  SCRIPT_DIR="$(cd "${NUMINA_MATH_LEAN_DIR}" && pwd)"
+# Determine the script's location. When running via sbatch, BASH_SOURCE[0]
+# points to a copy in /var/spool/slurmd/, so use SLURM_SUBMIT_DIR instead.
+if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+  SCRIPT_DIR="${SLURM_SUBMIT_DIR}"
 else
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  if [[ ! -d "${SCRIPT_DIR}/numina_math_lean_eval_project" ]]; then
-    if [[ -n "${SLURM_SUBMIT_DIR:-}" && -d "${SLURM_SUBMIT_DIR}/numina_math_lean_eval_project" ]]; then
-      SCRIPT_DIR="$(cd "${SLURM_SUBMIT_DIR}" && pwd)"
-    elif [[ -d "$(pwd)/numina_math_lean_eval_project" ]]; then
-      SCRIPT_DIR="$(pwd)"
-    else
-      echo "[materialize-repo] Could not locate dataset directory."
-      echo "[materialize-repo] Set NUMINA_MATH_LEAN_DIR or submit from datasets/numina-math-lean."
-      exit 1
-    fi
-  fi
 fi
 
 cd "${SCRIPT_DIR}"
 
 echo "[materialize-repo] Starting Numina materialization at $(date -Iseconds)"
 
-OUT_ROOT="${OUT_ROOT:-leandojo_repo}"
-mkdir -p "${OUT_ROOT}" "${OUT_ROOT}/failures"
+WORK_REPO="${SCRIPT_DIR}/numina_math_repo"
+mkdir -p "${SCRIPT_DIR}/failures"
 
-WORK_REPO="${WORK_REPO:-${OUT_ROOT}/numina_math_lean_eval_project}"
-WORK_REPO="$(python -c 'import os,sys; print(os.path.abspath(sys.argv[1]))' "${WORK_REPO}")"
-if [[ ! -e "${WORK_REPO}/.git" ]]; then
-  mkdir -p "$(dirname "${WORK_REPO}")"
+if [[ -e "${WORK_REPO}" ]]; then
   rm -rf "${WORK_REPO}"
-  git clone -q "${SCRIPT_DIR}/numina_math_lean_eval_project" "${WORK_REPO}"
 fi
+git clone -q "${SCRIPT_DIR}/base_dependency_repo" "${WORK_REPO}"
 if [[ ! -e "${WORK_REPO}/.git" ]]; then
   echo "[materialize-repo] WORK_REPO is not a git repository: ${WORK_REPO}"
   exit 1
 fi
+
 git -C "${WORK_REPO}" config user.email "materializer@local"
 git -C "${WORK_REPO}" config user.name "Materializer"
 echo "[materialize-repo] Using WORK_REPO=${WORK_REPO}"
@@ -62,22 +50,24 @@ for input in "${inputs[@]}"; do
   ext="${input##*.}"
   stem="${rel%.${ext}}"
 
-  manifest="${OUT_ROOT}/materialized/${stem}.manifest.jsonl"
-  failure_log="${OUT_ROOT}/failures/${stem}.failures.jsonl"
+  manifest="${SCRIPT_DIR}/materialized/${stem}.manifest.jsonl"
+  failure_log="${SCRIPT_DIR}/failures/${stem}.failures.jsonl"
 
   mkdir -p "$(dirname "${manifest}")" "$(dirname "${failure_log}")"
 
   echo "[materialize-repo] ${input} -> ${manifest}"
 
-  git -C "${WORK_REPO}" reset --hard -q
-  git -C "${WORK_REPO}" clean -fdq
+  materialize_base_cmd="uv run python materialize_numina_math_lean_repo.py --project-path ${WORK_REPO} --module-prefix NuminaMathRepo.Materialized"
+  if [[ -n "${MAX_EXAMPLES:-}" ]]; then
+    materialize_base_cmd="${materialize_base_cmd} --max-examples ${MAX_EXAMPLES}"
+  fi
 
   materialize_cmd=(
     uv run python materialize_numina_math_lean_repo.py
     --input-path "${input}"
     --project-path "${WORK_REPO}"
     --manifest-path "${manifest}"
-    --proof-fields "${PROOF_FIELDS:-formal_ground_truth,formal_proof}"
+    --module-prefix "NuminaMathRepo.Materialized"
   )
   if [[ -n "${MAX_EXAMPLES:-}" ]]; then
     materialize_cmd+=(--max-examples "${MAX_EXAMPLES}")
@@ -86,15 +76,14 @@ for input in "${inputs[@]}"; do
     echo "{\"reason\":\"materialize_failed\",\"input\":\"${input}\"}" > "${failure_log}"
     continue
   fi
-
-  git -C "${WORK_REPO}" add -A
-  if git -C "${WORK_REPO}" diff --cached --quiet; then
-    echo "[materialize-repo] no materialized changes for ${input}, skipping commit"
-    echo '{"reason":"no_materialized_changes"}' > "${failure_log}"
-    continue
-  fi
-  git -C "${WORK_REPO}" commit -q -m "materialize ${stem}"
-  echo "[materialize-repo] Committed materialized changes for ${stem}"
 done
+
+git -C "${WORK_REPO}" add -A
+if git -C "${WORK_REPO}" diff --cached --quiet; then
+  echo "[materialize-repo] no materialized changes to commit"
+else
+  git -C "${WORK_REPO}" commit -q -m "${materialize_base_cmd}"
+  echo "[materialize-repo] Committed all materialized changes"
+fi
 
 echo "[materialize-repo] Done at $(date -Iseconds)"
