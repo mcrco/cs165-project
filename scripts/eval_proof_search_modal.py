@@ -58,10 +58,10 @@ image = (
         "numpy>=1.21.0",
         "tqdm>=4.64.0",
     )
-    # Install pantograph from GitHub
-    .pip_install("pantograph", extra_options="--find-links https://github.com/stanford-centaur/PyPantograph")
-    # Install lean-dojo-v2 from local (assumes it's uploaded or available)
-    # For production, you'd want to pip install from the repo
+    # Install the correct Pantograph package (PyPantograph), not the unrelated PyPI package.
+    .pip_install("git+https://github.com/stanford-centaur/PyPantograph.git")
+    # Include local package source so container can import lean_dojo_v2 modules.
+    .add_local_python_source("lean_dojo_v2")
     .workdir("/workspace")
 )
 
