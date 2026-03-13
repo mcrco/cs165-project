@@ -69,6 +69,7 @@ package «NuminaMathRepo»
 require mathlib from git
   "https://github.com/leanprover-community/mathlib4.git" @ "$MATHLIB_TAG"
 
+@[default_target]
 lean_lib «NuminaMathRepo»
 EOF
 
