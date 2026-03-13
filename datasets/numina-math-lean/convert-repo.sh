@@ -50,7 +50,10 @@ TRACE_BUILD_DEPS="${TRACE_BUILD_DEPS:-1}"
 # Optional timeout (seconds) for `lake build` inside tracing.
 # If reached, tracing continues with partially built artifacts.
 LAKE_BUILD_TIMEOUT_SEC="${LAKE_BUILD_TIMEOUT_SEC:-1200}"
+# Continue conversion even if some materialized rows fail to compile.
+LEAN_DOJO_ALLOW_PARTIAL_BUILD="${LEAN_DOJO_ALLOW_PARTIAL_BUILD:-1}"
 export LAKE_BUILD_TIMEOUT_SEC
+export LEAN_DOJO_ALLOW_PARTIAL_BUILD
 
 export_cmd=(
   uv run python "${REPO_DIR}/datasets/export_materialized_repo_to_leandojo.py"

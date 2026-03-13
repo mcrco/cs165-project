@@ -152,12 +152,23 @@ def _trace(repo: LeanGitRepo, build_deps: bool) -> None:
                     f"Ignoring invalid LAKE_BUILD_TIMEOUT_SEC={timeout_env!r}; expected a positive number."
                 )
 
+        partial_build_env = os.getenv("LEAN_DOJO_ALLOW_PARTIAL_BUILD", "0").strip().lower()
+        allow_partial_build = partial_build_env in {"1", "true", "yes", "on"}
+
         try:
             execute("lake build", timeout=lake_build_timeout)
         except TimeoutExpired:
             logger.warning(
                 "Timed out while running `lake build`; continuing with partially built artifacts."
             )
+        except CalledProcessError as ex:
+            if allow_partial_build:
+                logger.warning(
+                    f"`lake build` failed with exit code {ex.returncode}; "
+                    "continuing with partially built artifacts."
+                )
+            else:
+                raise
 
         # Copy the Lean 4 stdlib into the path of packages.
         lean_prefix = execute(f"lean --print-prefix", capture_output=True)[0].strip()
