@@ -64,9 +64,10 @@ image = (
     # Install the correct Pantograph package (PyPantograph), not the unrelated PyPI package.
     # This requires `lake` to be available during wheel build.
     .pip_install("git+https://github.com/stanford-centaur/PyPantograph.git")
-    # Include local package source so container can import lean_dojo_v2 modules.
-    .add_local_python_source("lean_dojo_v2")
     .workdir("/workspace")
+    # Include local package source so container can import lean_dojo_v2 modules.
+    # Keep add_local_* last in the image chain (Modal requirement).
+    .add_local_python_source("lean_dojo_v2")
 )
 
 
