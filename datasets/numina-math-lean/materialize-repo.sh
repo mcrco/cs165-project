@@ -9,13 +9,13 @@
 
 set -euo pipefail
 
-# Determine the script's location. When running via sbatch, BASH_SOURCE[0]
-# points to a copy in /var/spool/slurmd/, so use SLURM_SUBMIT_DIR instead.
-# Assume we're running from datasets/numina-math-lean directory.
-if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+# Determine the script's location.
+# When running via sbatch, BASH_SOURCE[0] points to a copy in /var/spool/slurmd/,
+# so we detect that case and fall back to the current working directory (where
+# the script was submitted from).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ "${BASH_SOURCE[0]}" == /var/spool/slurmd/* && -n "${SLURM_SUBMIT_DIR:-}" ]]; then
   SCRIPT_DIR="${SLURM_SUBMIT_DIR}"
-else
-  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fi
 
 cd "${SCRIPT_DIR}"
