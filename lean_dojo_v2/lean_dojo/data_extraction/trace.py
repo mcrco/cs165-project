@@ -10,7 +10,7 @@ import shutil
 from contextlib import contextmanager
 from multiprocessing import Process
 from pathlib import Path
-from subprocess import CalledProcessError
+from subprocess import CalledProcessError, TimeoutExpired
 from time import monotonic, sleep
 from typing import Generator, List, Optional, Union
 
@@ -138,7 +138,26 @@ def _trace(repo: LeanGitRepo, build_deps: bool) -> None:
                 execute("lake exe cache get")
             except CalledProcessError:
                 pass
-        execute("lake build")
+        # Optional timeout for pathological builds. If the timeout is hit, we
+        # continue tracing whatever .olean files were produced so far.
+        timeout_env = os.getenv("LAKE_BUILD_TIMEOUT_SEC")
+        lake_build_timeout: Optional[float] = None
+        if timeout_env:
+            try:
+                parsed_timeout = float(timeout_env)
+                if parsed_timeout > 0:
+                    lake_build_timeout = parsed_timeout
+            except ValueError:
+                logger.warning(
+                    f"Ignoring invalid LAKE_BUILD_TIMEOUT_SEC={timeout_env!r}; expected a positive number."
+                )
+
+        try:
+            execute("lake build", timeout=lake_build_timeout)
+        except TimeoutExpired:
+            logger.warning(
+                "Timed out while running `lake build`; continuing with partially built artifacts."
+            )
 
         # Copy the Lean 4 stdlib into the path of packages.
         lean_prefix = execute(f"lean --print-prefix", capture_output=True)[0].strip()

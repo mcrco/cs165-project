@@ -47,11 +47,15 @@ mkdir -p "$(dirname "${OUTPUT_JSON}")"
 # Trace build deps to ensure files are processed even without pre-built .olean files.
 # Many Numina proofs have errors, so we let the tracer handle them individually.
 TRACE_BUILD_DEPS="${TRACE_BUILD_DEPS:-1}"
+# Optional timeout (seconds) for `lake build` inside tracing.
+# If reached, tracing continues with partially built artifacts.
+LAKE_BUILD_TIMEOUT_SEC="${LAKE_BUILD_TIMEOUT_SEC:-1200}"
+export LAKE_BUILD_TIMEOUT_SEC
 
 export_cmd=(
   uv run python "${REPO_DIR}/datasets/export_materialized_repo_to_leandojo.py"
   --project-path "${WORK_REPO}"
-  --module-prefix "NuminaMathLeanEval.Materialized"
+  --module-prefix "NuminaMathRepo.Materialized"
   --dataset-url "https://huggingface.co/datasets/AI-MO/NuminaMath-LEAN"
   --output-json "${OUTPUT_JSON}"
 )

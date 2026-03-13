@@ -91,19 +91,29 @@ def report_critical_failure(msg: str) -> Generator[None, None, None]:
 
 
 def execute(
-    cmd: Union[str, List[str]], capture_output: bool = False
+    cmd: Union[str, List[str]],
+    capture_output: bool = False,
+    timeout: Optional[float] = None,
 ) -> Optional[Tuple[str, str]]:
     """Execute the shell command ``cmd`` and optionally return its output.
 
     Args:
         cmd (Union[str, List[str]]): The shell command to execute.
         capture_output (bool, optional): Whether to capture and return the output. Defaults to False.
+        timeout (Optional[float], optional): Timeout in seconds for the command.
+            If None, wait indefinitely.
 
     Returns:
         Optional[Tuple[str, str]]: The command's output, including stdout and stderr (None if ``capture_output == False``).
     """
     try:
-        res = subprocess.run(cmd, shell=True, capture_output=capture_output, check=True)
+        res = subprocess.run(
+            cmd,
+            shell=True,
+            capture_output=capture_output,
+            check=True,
+            timeout=timeout,
+        )
     except subprocess.CalledProcessError as ex:
         if capture_output:
             logger.info(ex.stdout.decode())
