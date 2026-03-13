@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from datasets import load_dataset
+from tqdm import tqdm
 
 DEFAULT_DATASET_URL = "https://huggingface.co/datasets/AI-MO/NuminaMath-LEAN"
 NUMINA_DIR = Path(__file__).resolve().parent
@@ -134,7 +135,7 @@ def main() -> None:
     manifest_rows: list[dict[str, Any]] = []
     skipped = 0
 
-    for row_idx, row in enumerate(rows):
+    for row_idx, row in enumerate(tqdm(rows, desc="Materializing rows")):
         code = row.get("formal_ground_truth")
         if not isinstance(code, str) or not code.strip():
             skipped += 1
