@@ -31,10 +31,8 @@ REPO_ROOT = NUMINA_DIR.parents[1]
 EXTRACT_DATA_PATH = (
     REPO_ROOT / "lean_dojo_v2" / "lean_dojo" / "data_extraction" / "ExtractData.lean"
 )
-DEFAULT_PROJECT_PATH = NUMINA_DIR / "leandojo_repo" / "numina_math_lean_eval_project"
-DEFAULT_MANIFEST_PATH = (
-    NUMINA_DIR / "leandojo_repo" / "materialized" / "data" / "train-00000-of-00001.manifest.jsonl"
-)
+DEFAULT_PROJECT_PATH = NUMINA_DIR / "numina_math_repo"
+DEFAULT_MANIFEST_PATH = NUMINA_DIR / "materialized" / "data" / "train-00000-of-00001.manifest.jsonl"
 DEFAULT_OUTPUT_JSON = NUMINA_DIR / "leandojo_infilling" / "train.json"
 HOLE_TOKEN = "<HOLE>"
 
