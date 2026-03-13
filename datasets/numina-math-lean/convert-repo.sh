@@ -8,6 +8,7 @@ set -euo pipefail
 
 # Determine the script's location. When running via sbatch, BASH_SOURCE[0]
 # points to a copy in /var/spool/slurmd/, so use SLURM_SUBMIT_DIR instead.
+# Assume we're running from datasets/numina-math-lean directory.
 if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
   SCRIPT_DIR="${SLURM_SUBMIT_DIR}"
 else
@@ -49,7 +50,7 @@ TRACE_BUILD_DEPS="${TRACE_BUILD_DEPS:-0}"
 export_cmd=(
   uv run python "${REPO_DIR}/datasets/export_materialized_repo_to_leandojo.py"
   --project-path "${WORK_REPO}"
-  --module-prefix "NuminaMathRepo.Materialized"
+  --module-prefix "NuminaMathLeanEval.Materialized"
   --dataset-url "https://huggingface.co/datasets/AI-MO/NuminaMath-LEAN"
   --output-json "${OUTPUT_JSON}"
 )
