@@ -49,7 +49,10 @@ image = (
     # Install Lean toolchain (elan + lean)
     .run_commands(
         "curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y",
-        "echo 'export PATH=\"$HOME/.elan/bin:$PATH\"' >> ~/.bashrc",
+        "export PATH=/root/.elan/bin:$PATH && /root/.elan/bin/elan default stable",
+        "ln -sf /root/.elan/bin/lean /usr/local/bin/lean",
+        "ln -sf /root/.elan/bin/lake /usr/local/bin/lake",
+        "lean --version && lake --version",
     )
     .pip_install(
         "torch>=2.0.0",
@@ -59,6 +62,7 @@ image = (
         "tqdm>=4.64.0",
     )
     # Install the correct Pantograph package (PyPantograph), not the unrelated PyPI package.
+    # This requires `lake` to be available during wheel build.
     .pip_install("git+https://github.com/stanford-centaur/PyPantograph.git")
     # Include local package source so container can import lean_dojo_v2 modules.
     .add_local_python_source("lean_dojo_v2")
