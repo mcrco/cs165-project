@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Convert NuminaMath-LEAN raw data into infilling training examples.
+"""Convert NuminaMath-LEAN materialized repo into infilling training examples.
 
-This script takes raw parquet files containing Lean proofs and generates infilling
-training examples by replacing each tactic with <HOLE>. For each theorem with N
-tactics, it creates N training examples where each example has one tactic replaced
-by <HOLE> and the original tactic as the target to predict.
+This script takes a materialized Lean repository (created by materialize-repo.sh)
+and generates infilling training examples by replacing each tactic with <HOLE>.
+For each theorem with N tactics, it creates N training examples where each example
+has one tactic replaced by <HOLE> and the original tactic as the target.
 
 Output format matches the LeanDojo theorem JSON structure with additional fields
 for infilling tasks.
@@ -24,7 +24,6 @@ from pathlib import Path
 from typing import Any
 
 from tqdm.auto import tqdm
-from datasets import load_dataset
 
 DEFAULT_URL = "https://huggingface.co/datasets/AI-MO/NuminaMath-LEAN"
 NUMINA_DIR = Path(__file__).resolve().parent
@@ -32,10 +31,11 @@ REPO_ROOT = NUMINA_DIR.parents[1]
 EXTRACT_DATA_PATH = (
     REPO_ROOT / "lean_dojo_v2" / "lean_dojo" / "data_extraction" / "ExtractData.lean"
 )
-DEFAULT_INPUT_PATH = NUMINA_DIR / "raw"
+DEFAULT_PROJECT_PATH = NUMINA_DIR / "leandojo_repo" / "numina_math_lean_eval_project"
+DEFAULT_MANIFEST_PATH = (
+    NUMINA_DIR / "leandojo_repo" / "materialized" / "data" / "train-00000-of-00001.manifest.jsonl"
+)
 DEFAULT_OUTPUT_JSON = NUMINA_DIR / "leandojo_infilling" / "train.json"
-DEFAULT_PROJECT_PATH = NUMINA_DIR / "numina_math_lean_eval_project"
-DEFAULT_PROOF_FIELDS = ["formal_ground_truth", "formal_proof"]
 HOLE_TOKEN = "<HOLE>"
 
 
@@ -62,71 +62,23 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def load_rows(input_path: Path) -> list[dict[str, Any]]:
-    if input_path.is_file():
-        if input_path.suffix == ".jsonl":
-            return read_jsonl(input_path)
-        if input_path.suffix == ".parquet":
-            ds = load_dataset("parquet", data_files=str(input_path), split="train")
-            return [dict(rec) for rec in ds]
-        raise ValueError(f"Unsupported input file type: {input_path}")
-
-    if not input_path.is_dir():
-        raise FileNotFoundError(f"Input path does not exist: {input_path}")
-
-    parquet_files = sorted(input_path.rglob("*.parquet"))
-    if parquet_files:
-        ds = load_dataset(
-            "parquet", data_files=[str(p) for p in parquet_files], split="train"
-        )
-        return [dict(rec) for rec in ds]
-
-    jsonl_files = sorted(input_path.rglob("*.jsonl"))
-    if jsonl_files:
-        rows: list[dict[str, Any]] = []
-        for file in jsonl_files:
-            rows.extend(read_jsonl(file))
-        return rows
-
-    raise FileNotFoundError(
-        f"No parquet/jsonl files found under input directory: {input_path}"
-    )
+def load_manifest(manifest_path: Path) -> list[dict[str, Any]]:
+    """Load the manifest file that maps row indices to materialized file paths."""
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"Manifest file not found: {manifest_path}")
+    return read_jsonl(manifest_path)
 
 
-def parse_proof_fields(raw: str) -> list[str]:
-    fields = [part.strip() for part in raw.split(",") if part.strip()]
-    if not fields:
-        raise ValueError("--proof-fields must contain at least one field")
-    return fields
-
-
-def select_proof(
-    row: dict[str, Any], proof_fields: list[str]
-) -> tuple[str | None, str]:
-    for field in proof_fields:
-        val = row.get(field)
-        if isinstance(val, str) and val.strip():
-            return field, val
-    return None, ""
-
-
-def infer_full_name(row: dict[str, Any], code: str, idx: int) -> str:
-    theorem_name = row.get("theorem")
-    if theorem_name and isinstance(theorem_name, str):
-        return theorem_name
-
+def infer_full_name(code: str, default_name: str) -> str:
+    """Extract theorem name from code or use default."""
     m = re.search(r"\b(?:theorem|lemma)\s+([A-Za-z0-9_'.]+)", code)
     if m:
         return m.group(1)
-
-    uid = row.get("uuid")
-    if isinstance(uid, str) and uid:
-        return f"numina_{uid}"
-
-    return f"numina_{idx}"
+    return default_name
 
 
 def infer_statement(code: str) -> str:
+    """Extract the theorem statement (between theorem name and := by)."""
     m = re.search(
         r"\b(?:theorem|lemma)\s+[A-Za-z0-9_'.]+\s*(.*?)\s*:=\s*by",
         code,
@@ -142,6 +94,7 @@ def run_extract_data(
     lean_relative_path: Path,
     timeout_seconds: int,
 ) -> tuple[int, str, str]:
+    """Run ExtractData.lean on a file to get tactic traces."""
     cmd = [
         "lake",
         "env",
@@ -181,6 +134,7 @@ def run_extract_data(
 
 
 def get_ast_json_path(project_path: Path, lean_relative_path: Path) -> Path | None:
+    """Find the AST JSON file generated by ExtractData.lean."""
     rel = lean_relative_path.with_suffix(".ast.json")
     candidates = [
         project_path / ".lake" / "build" / "ir" / rel,
@@ -193,6 +147,7 @@ def get_ast_json_path(project_path: Path, lean_relative_path: Path) -> Path | No
 
 
 def extract_raw_tactic(code_bytes: bytes, start: int, end: int) -> str:
+    """Extract tactic text from byte positions in the source code."""
     if start < 0 or end < start:
         return ""
     if start >= len(code_bytes):
@@ -202,6 +157,7 @@ def extract_raw_tactic(code_bytes: bytes, start: int, end: int) -> str:
 
 
 def parse_byte_offset(value: Any) -> int | None:
+    """Parse byte offset from AST JSON (handles int or dict formats)."""
     if isinstance(value, int):
         return value
     if isinstance(value, dict):
@@ -233,11 +189,13 @@ def parse_tactics_from_ast(ast_json_path: Path, code: str) -> list[dict[str, Any
         state_before = str(tac.get("stateBefore") or "").strip()
         state_after = str(tac.get("stateAfter") or "").strip()
 
+        # Skip invalid or unwanted tactics
         if not tactic_text or tactic_text == "sorry":
             continue
         if state_before == "no goals" or "·" in tactic_text:
             continue
 
+        # Deduplicate by (state_before, tactic, state_after) signature
         sig = (state_before, tactic_text, state_after)
         if sig in seen:
             continue
@@ -255,8 +213,8 @@ def parse_tactics_from_ast(ast_json_path: Path, code: str) -> list[dict[str, Any
     return tactics
 
 
-def create_proof_with_hole(code: str, tactic_info: dict[str, Any]) -> str:
-    """Replace a tactic at specific byte positions with <HOLE>."""
+def create_proof_with_hole(code: str, tactic_info: dict[str, Any], hole_token: str) -> str:
+    """Replace a tactic at specific byte positions with the hole token."""
     code_bytes = code.encode("utf-8")
     start = tactic_info["start_byte"]
     end = tactic_info["end_byte"]
@@ -264,23 +222,24 @@ def create_proof_with_hole(code: str, tactic_info: dict[str, Any]) -> str:
     before = code_bytes[:start].decode("utf-8", errors="ignore")
     after = code_bytes[end:].decode("utf-8", errors="ignore")
 
-    return before + HOLE_TOKEN + after
+    return before + hole_token + after
 
 
 def create_infilling_examples(
     theorem_record: dict[str, Any],
     tactics: list[dict[str, Any]],
     code: str,
+    hole_token: str,
 ) -> list[dict[str, Any]]:
     """Create infilling examples for each tactic in a theorem.
 
-    For each tactic, creates an example where that tactic is replaced by <HOLE>.
+    For each tactic, creates an example where that tactic is replaced by the hole token.
     """
     examples = []
 
     for i, tactic_info in enumerate(tactics):
-        # Create proof with this tactic replaced by <HOLE>
-        proof_with_hole = create_proof_with_hole(code, tactic_info)
+        # Create proof with this tactic replaced by hole
+        proof_with_hole = create_proof_with_hole(code, tactic_info, hole_token)
 
         example = {
             # Original LeanDojo fields
@@ -308,36 +267,53 @@ def create_infilling_examples(
     return examples
 
 
-def process_row(
-    row_idx: int,
-    row: dict[str, Any],
+def process_file(
+    manifest_entry: dict[str, Any],
     project_path: Path,
-    tmp_dir: Path,
     extract_timeout: int,
-    proof_fields: list[str],
+    hole_token: str,
 ) -> tuple[int, list[dict[str, Any]] | None, dict[str, Any] | None]:
-    """Process a single row and return infilling examples or error info."""
-    proof_field, code = select_proof(row, proof_fields)
-    if not code:
+    """Process a single materialized file and return infilling examples or error info."""
+    row_idx = manifest_entry["row_idx"]
+    relative_path = Path(manifest_entry["relative_path"])
+    file_path = project_path / relative_path
+    module_name = manifest_entry["module"]
+    uuid = manifest_entry.get("uuid", f"row_{row_idx}")
+
+    # Read the Lean file
+    if not file_path.is_file():
         return (
             row_idx,
             None,
             {
                 "row_idx": row_idx,
-                "reason": "missing_proof_fields",
-                "uuid": row.get("uuid"),
-                "proof_fields": proof_fields,
+                "reason": "file_not_found",
+                "uuid": uuid,
+                "module": module_name,
+                "file_path": str(file_path),
             },
         )
 
-    tmp_file = tmp_dir / f"ex_{row_idx}.lean"
-    tmp_rel = tmp_file.relative_to(project_path)
-    tmp_file.write_text(code, encoding="utf-8")
+    try:
+        code = file_path.read_text(encoding="utf-8")
+    except Exception as ex:
+        return (
+            row_idx,
+            None,
+            {
+                "row_idx": row_idx,
+                "reason": f"read_error:{type(ex).__name__}",
+                "uuid": uuid,
+                "module": module_name,
+                "detail": str(ex),
+            },
+        )
 
+    # Run ExtractData to get tactic information
     try:
         returncode, stdout, stderr = run_extract_data(
             project_path,
-            tmp_rel,
+            relative_path,
             timeout_seconds=extract_timeout,
         )
     except subprocess.TimeoutExpired as ex:
@@ -355,8 +331,8 @@ def process_row(
             {
                 "row_idx": row_idx,
                 "reason": "extractdata_timeout",
-                "uuid": row.get("uuid"),
-                "proof_field": proof_field,
+                "uuid": uuid,
+                "module": module_name,
                 "detail": detail,
             },
         )
@@ -367,8 +343,8 @@ def process_row(
             {
                 "row_idx": row_idx,
                 "reason": f"extractdata_exception:{type(ex).__name__}",
-                "uuid": row.get("uuid"),
-                "proof_field": proof_field,
+                "uuid": uuid,
+                "module": module_name,
                 "detail": str(ex),
             },
         )
@@ -385,14 +361,15 @@ def process_row(
         rec: dict[str, Any] = {
             "row_idx": row_idx,
             "reason": "extractdata_process_error",
-            "uuid": row.get("uuid"),
-            "proof_field": proof_field,
+            "uuid": uuid,
+            "module": module_name,
         }
         if detail:
             rec["detail"] = detail
         return row_idx, None, rec
 
-    ast_json_path = get_ast_json_path(project_path, tmp_rel)
+    # Find and parse the AST JSON
+    ast_json_path = get_ast_json_path(project_path, relative_path)
     if ast_json_path is None:
         return (
             row_idx,
@@ -400,9 +377,9 @@ def process_row(
             {
                 "row_idx": row_idx,
                 "reason": "missing_ast_json",
-                "uuid": row.get("uuid"),
-                "proof_field": proof_field,
-                "detail": str(tmp_rel),
+                "uuid": uuid,
+                "module": module_name,
+                "detail": str(relative_path),
             },
         )
 
@@ -415,8 +392,8 @@ def process_row(
             {
                 "row_idx": row_idx,
                 "reason": f"parse_ast_json_exception:{type(ex).__name__}",
-                "uuid": row.get("uuid"),
-                "proof_field": proof_field,
+                "uuid": uuid,
+                "module": module_name,
                 "detail": str(ex),
             },
         )
@@ -428,22 +405,20 @@ def process_row(
             {
                 "row_idx": row_idx,
                 "reason": "no_traced_tactics",
-                "uuid": row.get("uuid"),
-                "proof_field": proof_field,
+                "uuid": uuid,
+                "module": module_name,
             },
         )
 
     # Create the base theorem record
-    theorem_name = infer_full_name(row, code, row_idx)
+    theorem_name = infer_full_name(code, module_name.replace(".", "_"))
     theorem_statement = infer_statement(code)
-    source = str(row.get("source") or "numina_math_lean")
-    uid = str(row.get("uuid") or row_idx)
-    file_path = f"{source}/{uid}.lean"
+    source = str(manifest_entry.get("source") or "numina_math_lean")
 
     base_record = {
         "url": DEFAULT_URL,
         "commit": "",
-        "file_path": file_path,
+        "file_path": str(relative_path),
         "full_name": theorem_name,
         "theorem_statement": theorem_statement,
         "start": [1, 1],
@@ -451,7 +426,9 @@ def process_row(
     }
 
     # Create infilling examples
-    infilling_examples = create_infilling_examples(base_record, tactics, code)
+    infilling_examples = create_infilling_examples(
+        base_record, tactics, code, hole_token
+    )
 
     return row_idx, infilling_examples, None
 
@@ -459,12 +436,21 @@ def process_row(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--input-path",
+        "--project-path",
         type=Path,
-        default=DEFAULT_INPUT_PATH,
+        default=DEFAULT_PROJECT_PATH,
         help=(
-            "NuminaMath-LEAN source path (dir or parquet/jsonl file) "
-            f"(default: {DEFAULT_INPUT_PATH})"
+            "Path to the materialized Lean project "
+            f"(default: {DEFAULT_PROJECT_PATH})"
+        ),
+    )
+    parser.add_argument(
+        "--manifest-path",
+        type=Path,
+        default=DEFAULT_MANIFEST_PATH,
+        help=(
+            "Path to the manifest JSONL file that maps row indices to file paths "
+            f"(default: {DEFAULT_MANIFEST_PATH})"
         ),
     )
     parser.add_argument(
@@ -472,21 +458,6 @@ def main() -> None:
         type=Path,
         default=DEFAULT_OUTPUT_JSON,
         help=f"Output JSON path for infilling examples (default: {DEFAULT_OUTPUT_JSON})",
-    )
-    parser.add_argument(
-        "--project-path",
-        type=Path,
-        default=DEFAULT_PROJECT_PATH,
-        help=f"Lean project root for running ExtractData.lean (default: {DEFAULT_PROJECT_PATH})",
-    )
-    parser.add_argument(
-        "--proof-fields",
-        type=str,
-        default=",".join(DEFAULT_PROOF_FIELDS),
-        help=(
-            "Comma-separated proof fields to try in order "
-            f"(default: {','.join(DEFAULT_PROOF_FIELDS)})"
-        ),
     )
     parser.add_argument(
         "--max-theorems",
@@ -504,19 +475,19 @@ def main() -> None:
         "--extract-timeout",
         type=int,
         default=300,
-        help="Per-file timeout (seconds) for `lake env lean --run ExtractData.lean` (default: 300)",
+        help="Per-file timeout (seconds) for tactic extraction (default: 300)",
     )
     parser.add_argument(
         "--jobs",
         type=int,
         default=1,
-        help="Number of concurrent worker threads for conversion (default: 1)",
+        help="Number of concurrent worker threads (default: 1)",
     )
     parser.add_argument(
         "--failure-log",
         type=Path,
         default=None,
-        help="Optional JSONL path to write per-row failure diagnostics",
+        help="Optional JSONL path to write per-file failure diagnostics",
     )
     parser.add_argument(
         "--print-failures",
@@ -532,11 +503,11 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    proof_fields = parse_proof_fields(args.proof_fields)
-    rows = load_rows(args.input_path)
+    # Load manifest
+    manifest = load_manifest(args.manifest_path)
 
     if args.max_theorems is not None:
-        rows = rows[: args.max_theorems]
+        manifest = manifest[: args.max_theorems]
 
     configure_elan_toolchain(args.project_path)
     if not args.project_path.is_dir():
@@ -550,18 +521,12 @@ def main() -> None:
     failure_rows: list[dict[str, Any]] = []
     failure_reasons: Counter[str] = Counter()
 
-    # Keep generated files under a real module root so Lean can resolve module names.
-    tmp_dir = args.project_path / "NuminaMathLeanEval" / "Generated"
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-    for p in tmp_dir.glob("ex_*.lean"):
-        p.unlink()
-
     if args.jobs < 1:
         raise ValueError("--jobs must be >= 1")
 
     progress = tqdm(
-        total=len(rows),
-        desc=f"Processing {args.input_path.name}",
+        total=len(manifest),
+        desc=f"Processing materialized repo",
         unit="theorem",
     )
 
@@ -582,15 +547,13 @@ def main() -> None:
             failure_reasons[failure_rec["reason"]] += 1
 
     if args.jobs == 1:
-        for row_idx, row in enumerate(rows):
+        for entry in manifest:
             ingest_result(
-                process_row(
-                    row_idx,
-                    row,
+                process_file(
+                    entry,
                     args.project_path,
-                    tmp_dir,
                     args.extract_timeout,
-                    proof_fields,
+                    args.hole_token,
                 )
             )
             progress.update(1)
@@ -604,15 +567,13 @@ def main() -> None:
         with ThreadPoolExecutor(max_workers=args.jobs) as executor:
             futures = [
                 executor.submit(
-                    process_row,
-                    row_idx,
-                    row,
+                    process_file,
+                    entry,
                     args.project_path,
-                    tmp_dir,
                     args.extract_timeout,
-                    proof_fields,
+                    args.hole_token,
                 )
-                for row_idx, row in enumerate(rows)
+                for entry in manifest
             ]
             for future in as_completed(futures):
                 ingest_result(future.result())
@@ -626,7 +587,7 @@ def main() -> None:
 
     progress.close()
 
-    # Sort examples by theorem index and hole index for consistency
+    # Sort examples by file path and hole index for consistency
     all_examples.sort(key=lambda ex: (ex["file_path"], ex["infilling"]["hole_index"]))
     failure_rows.sort(key=lambda rec: rec["row_idx"])
 
@@ -641,10 +602,10 @@ def main() -> None:
             for rec in failure_rows:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
-    total = len(rows)
+    total = len(manifest)
     total_examples = len(all_examples)
 
-    print(f"Processed {total} theorems")
+    print(f"Processed {total} theorems from materialized repo")
     print(f"Theorems with infilling examples: {num_theorems_with_examples}")
     print(f"Total infilling examples: {total_examples}")
     print(f"Failed theorems: {num_failed}")
@@ -663,7 +624,7 @@ def main() -> None:
         for rec in failure_rows[: args.print_failures]:
             print(
                 f"  - row={rec['row_idx']} reason={rec['reason']} "
-                f"uuid={rec.get('uuid')} proof_field={rec.get('proof_field')}"
+                f"uuid={rec.get('uuid')} module={rec.get('module')}"
             )
 
 
