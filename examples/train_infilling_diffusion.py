@@ -26,7 +26,7 @@ from lean_dojo_v2.trainer.diffusion_sft_trainer import InfillingDiffusionTrainer
 # Adjust these paths based on your dataset location
 train_path = Path("datasets/april/leandojo_infilling/train.train.json")
 val_path = Path("datasets/april/leandojo_infilling/train.val.json")
-output_dir = "outputs/infilling-mdm-7b"
+output_dir = "outputs/infilling-mdm-7b-april"
 wandb_project = os.getenv("WANDB_PROJECT", "infilling")
 wandb_run_name = "infilling-mdm-7b-april"
 
