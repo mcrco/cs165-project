@@ -7,6 +7,8 @@ datasets/april/*/
 datasets/numina-math-lean/*/
 **/slurm*.out
 logs
+wandb
+outputs
 
 *.pkl
 retrieval/bm25

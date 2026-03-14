@@ -27,7 +27,7 @@ from lean_dojo_v2.trainer.diffusion_sft_trainer import InfillingDiffusionTrainer
 train_path = Path("datasets/april/leandojo_infilling/train.train.json")
 val_path = Path("datasets/april/leandojo_infilling/train.val.json")
 output_dir = "outputs/infilling-mdm-7b"
-wandb_project = os.getenv("WANDB_PROJECT", "CS165Proj")
+wandb_project = os.getenv("WANDB_PROJECT", "infilling")
 wandb_run_name = "infilling-mdm-7b-april"
 
 # Optional: LoRA configuration for efficient fine-tuning

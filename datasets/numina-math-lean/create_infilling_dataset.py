@@ -88,6 +88,30 @@ def infer_statement(code: str) -> str:
     return ""
 
 
+def infer_problem(manifest_entry: dict[str, Any]) -> str:
+    """Best-effort extraction of natural-language problem text."""
+    direct_keys = (
+        "problem",
+        "statement",
+        "question",
+        "informal_statement",
+        "nl_statement",
+        "prompt",
+    )
+    for key in direct_keys:
+        value = manifest_entry.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    metadata = manifest_entry.get("metadata")
+    if isinstance(metadata, dict):
+        for key in direct_keys:
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
 def run_extract_data(
     project_path: Path,
     lean_relative_path: Path,
@@ -388,6 +412,7 @@ def create_infilling_examples(
             "file_path": theorem_record["file_path"],
             "full_name": theorem_record["full_name"],
             "theorem_statement": theorem_record["theorem_statement"],
+            "problem": theorem_record.get("problem", ""),
             "start": theorem_record["start"],
             "end": theorem_record["end"],
             # Infilling-specific fields
@@ -609,6 +634,7 @@ def process_file(
     # Create the base theorem record
     theorem_name = infer_full_name(code, module_name.replace(".", "_"))
     theorem_statement = infer_statement(code)
+    problem = infer_problem(manifest_entry)
     source = str(manifest_entry.get("source") or "numina_math_lean")
 
     base_record = {
@@ -617,6 +643,7 @@ def process_file(
         "file_path": str(relative_path),
         "full_name": theorem_name,
         "theorem_statement": theorem_statement,
+        "problem": problem,
         "start": [1, 1],
         "end": [1, 1],
     }

@@ -4,7 +4,7 @@ import json
 import os
 import random
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -19,6 +19,13 @@ from transformers import (
 )
 
 from lean_dojo_v2.database import DynamicDatabase
+from lean_dojo_v2.diffusion import (
+    DEFAULT_DIFFUSION_STEPS,
+    DEFAULT_DIFFUSION_TEMPERATURE,
+    DEFAULT_REMASKING,
+    decode_until_stop,
+    denoise_masked_sequence,
+)
 from lean_dojo_v2.lean_dojo.data_extraction.lean import LeanGitRepo
 from lean_dojo_v2.utils import remove_marks
 
@@ -34,6 +41,42 @@ def _ensure_prepare_inputs_for_generation(model) -> None:
         return model_inputs
 
     model.prepare_inputs_for_generation = _prepare_inputs_for_generation  # type: ignore[attr-defined]
+
+
+def _normalize_optional_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _build_infilling_user_content(theorem_statement: str) -> str:
+    chunks: List[str] = [
+        "Implement a Lean 4 proof for the given formal statement.",
+    ]
+    if theorem_statement:
+        chunks.append(f"Formal statement:\n{theorem_statement}")
+    chunks.append("Output only Lean 4 proof code.")
+    return "\n\n".join(chunks)
+
+
+def _build_infilling_prompt_prefix(tokenizer, theorem_statement: str) -> Tuple[str, str]:
+    user_content = _build_infilling_user_content(theorem_statement)
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a Lean 4 proof generator.\n"
+                "You are given a theorem statement and a partial Lean 4 proof with a masked span.\n"
+                "Output only the completed proof text, preserving surrounding code and syntax.\n"
+                "Never use `sorry` or `admit`."
+            ),
+        },
+        {"role": "user", "content": user_content},
+    ]
+    prompt_prefix = tokenizer.apply_chat_template(
+        messages, add_generation_prompt=True, tokenize=False
+    )
+    return prompt_prefix, user_content
 
 
 class DiffusionSFTDataset:
@@ -238,6 +281,7 @@ class DiffusionSFTTrainer:
         batch_size: int = 1,
         lr: float = 2e-5,
         max_length: int = 1024,
+        gen_length: int = 64,
         min_mask_ratio: float = 0.01,
         max_mask_ratio: float = 1.0,
         lora_config: Optional[LoraConfig] = None,
@@ -246,6 +290,7 @@ class DiffusionSFTTrainer:
         self.model_name = model_name
         self.output_dir = output_dir
         self.max_length = max_length
+        self.gen_length = gen_length
         self.min_mask_ratio = min_mask_ratio
         self.max_mask_ratio = max_mask_ratio
         self.lora_config = lora_config
@@ -326,6 +371,7 @@ class DiffusionSFTTrainer:
                 data_path=train_file,
                 tokenizer=self.tokenizer,
                 max_length=self.max_length,
+                gen_length=self.gen_length,
             ).to_hf()
 
             trainer = self._build_trainer(train_dataset)
@@ -339,6 +385,62 @@ class DiffusionSFTTrainer:
                 trainer.save_model(self.output_dir)
 
         self.tokenizer.save_pretrained(self.output_dir)
+
+    def sample_next_tactic(
+        self,
+        goal_state: str,
+        *,
+        num_return_sequences: int = 1,
+        steps: int = DEFAULT_DIFFUSION_STEPS,
+        temperature: float = DEFAULT_DIFFUSION_TEMPERATURE,
+        remasking: str = DEFAULT_REMASKING,
+    ) -> List[str]:
+        """Iteratively denoise a masked generation span for next-tactic prediction."""
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a Lean 4 tactic generator. Given a goal state, "
+                    "output exactly ONE Lean tactic that advances or solves the goal.\n"
+                    "Rules:\n"
+                    "- Output only the tactic text; no prose or code fences.\n"
+                    "- Single line only; no `by` blocks.\n"
+                    "- Never use `sorry` or `admit`.\n"
+                ),
+            },
+            {"role": "user", "content": goal_state},
+        ]
+        prompt = self.tokenizer.apply_chat_template(
+            messages, add_generation_prompt=True, tokenize=False
+        )
+        encoded = self.tokenizer(prompt, return_tensors="pt")
+        prompt_ids = encoded.input_ids.to(self.model.device)
+        prompt_ids = prompt_ids.repeat(num_return_sequences, 1)
+
+        x = torch.full(
+            (num_return_sequences, prompt_ids.shape[1] + self.gen_length),
+            self.mask_token_id,
+            dtype=torch.long,
+            device=self.model.device,
+        )
+        x[:, : prompt_ids.shape[1]] = prompt_ids
+        attention_mask = torch.ones_like(x)
+
+        sampled = denoise_masked_sequence(
+            model=self.model,
+            input_ids=x,
+            attention_mask=attention_mask,
+            mask_token_id=self.mask_token_id,
+            steps=steps,
+            temperature=temperature,
+            remasking=remasking,
+        )
+
+        generated_only = sampled[:, prompt_ids.shape[1] :].tolist()
+        return [
+            decode_until_stop(self.tokenizer, seq, self.mask_token_id)
+            for seq in generated_only
+        ]
 
 
 class InfillingMDMDataset:
@@ -382,6 +484,7 @@ class InfillingMDMDataset:
             infilling = item.get("infilling", {})
             proof_with_hole = infilling.get("proof_with_hole", "")
             target_tactic = infilling.get("target_tactic", "").strip()
+            theorem_statement = _normalize_optional_text(item.get("theorem_statement", ""))
 
             if not proof_with_hole or not target_tactic or target_tactic == "sorry":
                 continue
@@ -395,34 +498,49 @@ class InfillingMDMDataset:
             left_text = proof_with_hole[:hole_pos]
             right_text = proof_with_hole[hole_pos + len(self.hole_token):]
 
+            prompt_prefix, user_content = _build_infilling_prompt_prefix(
+                self.tokenizer, theorem_statement=theorem_statement
+            )
+            prompt_ids = self.tokenizer(
+                prompt_prefix,
+                add_special_tokens=False,
+                truncation=True,
+                max_length=self.max_length,
+            )["input_ids"]
+            if len(prompt_ids) + self.mask_span_length > self.max_length:
+                continue
+
+            available_for_proof = self.max_length - len(prompt_ids)
+
             # Tokenize left and right contexts
             left_ids = self.tokenizer(
                 left_text,
                 add_special_tokens=False,
                 truncation=True,
-                max_length=self.max_length - self.mask_span_length,
+                max_length=available_for_proof - self.mask_span_length,
             )["input_ids"]
 
             right_ids = self.tokenizer(
                 right_text,
                 add_special_tokens=False,
                 truncation=True,
-                max_length=self.max_length - self.mask_span_length - len(left_ids),
+                max_length=available_for_proof - self.mask_span_length - len(left_ids),
             )["input_ids"]
 
             # Check if combined length fits
-            total_len = len(left_ids) + self.mask_span_length + len(right_ids)
-            if total_len > self.max_length:
+            total_proof_len = len(left_ids) + self.mask_span_length + len(right_ids)
+            if total_proof_len > available_for_proof:
                 # Truncate right context more aggressively
-                available_for_right = self.max_length - len(left_ids) - self.mask_span_length
+                available_for_right = available_for_proof - len(left_ids) - self.mask_span_length
                 if available_for_right < 0:
                     continue  # Left context too long, skip this example
                 right_ids = right_ids[:available_for_right]
-                total_len = len(left_ids) + self.mask_span_length + len(right_ids)
+                total_proof_len = len(left_ids) + self.mask_span_length + len(right_ids)
 
-            # Build input_ids: left + mask_span + right
+            # Build assistant ids: left + mask_span + right
             mask_span = [self.mask_token_id] * self.mask_span_length
-            input_ids = left_ids + mask_span + right_ids
+            assistant_ids = left_ids + mask_span + right_ids
+            input_ids = prompt_ids + assistant_ids
 
             # Tokenize target tactic + EOS
             target_ids = self.tokenizer(
@@ -431,9 +549,10 @@ class InfillingMDMDataset:
             )["input_ids"]
             target_plus_eos = target_ids + [eos_id]
 
-            # Build labels: -100 everywhere, fill mask span with target
+            # Build labels: -100 everywhere, fill only mask span with target
             labels = [-100] * len(input_ids)
-            mask_start = len(left_ids)
+            assistant_start = len(prompt_ids)
+            mask_start = assistant_start + len(left_ids)
             mask_end = mask_start + self.mask_span_length
 
             # Fill with target tactic tokens
@@ -449,8 +568,12 @@ class InfillingMDMDataset:
             processed.append({
                 "input_ids": input_ids,
                 "labels": labels,
+                "assistant_start": assistant_start,
+                "mask_start": mask_start,
+                "mask_end": mask_end,
                 "full_name": item.get("full_name", ""),
-                "theorem_statement": item.get("theorem_statement", ""),
+                "theorem_statement": theorem_statement,
+                "prompt_user": user_content,
                 "proof_with_hole": proof_with_hole,
                 "target_tactic": target_tactic,
                 "state_before_hole": infilling.get("state_before_hole", ""),
@@ -512,6 +635,9 @@ class WandbQualitativeCallback(TrainerCallback):
         eval_dataset: Optional[Dataset],
         log_every_n_steps: int,
         num_samples_per_split: int,
+        sampling_steps: int = DEFAULT_DIFFUSION_STEPS,
+        sampling_temperature: float = DEFAULT_DIFFUSION_TEMPERATURE,
+        sampling_remasking: str = DEFAULT_REMASKING,
         seed: int = 0,
     ):
         self.wandb = wandb_module
@@ -521,6 +647,9 @@ class WandbQualitativeCallback(TrainerCallback):
         self.eval_dataset = eval_dataset
         self.log_every_n_steps = max(1, int(log_every_n_steps))
         self.num_samples_per_split = max(1, int(num_samples_per_split))
+        self.sampling_steps = max(1, int(sampling_steps))
+        self.sampling_temperature = float(sampling_temperature)
+        self.sampling_remasking = sampling_remasking
         self.seed = seed
         self._last_logged_step: Optional[int] = None
 
@@ -542,33 +671,47 @@ class WandbQualitativeCallback(TrainerCallback):
         return sorted(rng.sample(range(n), k))
 
     def _decode_predicted_tactic(self, token_ids: List[int]) -> str:
-        cleaned: List[int] = []
-        eos_id = self.tokenizer.eos_token_id
-        pad_id = self.tokenizer.pad_token_id
-        for token_id in token_ids:
-            if eos_id is not None and token_id == eos_id:
-                break
-            if token_id == self.mask_token_id:
-                break
-            if pad_id is not None and token_id == pad_id:
-                break
-            cleaned.append(token_id)
-        if not cleaned:
-            return ""
-        return self.tokenizer.decode(cleaned, skip_special_tokens=True).strip()
+        return decode_until_stop(self.tokenizer, token_ids, self.mask_token_id)
 
     def _predict_tactic(self, model, row: Dict[str, Any]) -> str:
         device = next(model.parameters()).device
         input_ids = torch.tensor(row["input_ids"], dtype=torch.long, device=device).unsqueeze(0)
         attention_mask = torch.ones_like(input_ids)
-        labels = row["labels"]
-        supervised_positions = [idx for idx, label in enumerate(labels) if label != -100]
-        if not supervised_positions:
-            return ""
 
-        with torch.no_grad():
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-        predicted_ids = outputs.logits.argmax(dim=-1)[0].tolist()
+        # Support both schemas:
+        # - infilling chat dataset: row has mask_start/mask_end for target span
+        # - infilling dataset: row has labels indicating the mask span
+        # - next-tactic dataset: row has assistant_start for generation region
+        if "mask_start" in row and "mask_end" in row:
+            mask_start = int(row["mask_start"])
+            mask_end = int(row["mask_end"])
+            supervised_positions = list(range(mask_start, min(mask_end, input_ids.shape[1])))
+            if not supervised_positions:
+                return ""
+            masked_input = input_ids.clone()
+            masked_input[:, mask_start:mask_end] = self.mask_token_id
+        elif "assistant_start" in row:
+            assistant_start = int(row["assistant_start"])
+            supervised_positions = list(range(assistant_start, input_ids.shape[1]))
+            masked_input = input_ids.clone()
+            masked_input[:, assistant_start:] = self.mask_token_id
+        else:
+            labels = row["labels"]
+            supervised_positions = [idx for idx, label in enumerate(labels) if label != -100]
+            if not supervised_positions:
+                return ""
+            masked_input = input_ids
+
+        sampled = denoise_masked_sequence(
+            model=model,
+            input_ids=masked_input,
+            attention_mask=attention_mask,
+            mask_token_id=self.mask_token_id,
+            steps=self.sampling_steps,
+            temperature=self.sampling_temperature,
+            remasking=self.sampling_remasking,
+        )
+        predicted_ids = sampled[0].tolist()
         predicted_span = [predicted_ids[pos] for pos in supervised_positions]
         return self._decode_predicted_tactic(predicted_span)
 
@@ -602,7 +745,10 @@ class WandbQualitativeCallback(TrainerCallback):
             if theorem_statement:
                 theorem = f"{theorem}: {theorem_statement}" if theorem else theorem_statement
 
-            prompt = row.get("proof_with_hole", "")
+            prompt = row.get("prompt_user", "")
+            proof_with_hole = row.get("proof_with_hole", "")
+            if proof_with_hole:
+                prompt = f"{prompt}\n\nAssistant proof template:\n{proof_with_hole}" if prompt else proof_with_hole
             expected_tactic = row.get("target_tactic", "")
             predicted_tactic = self._predict_tactic(model, row)
 
@@ -753,7 +899,7 @@ class InfillingDiffusionTrainer:
             remove_unused_columns=False,
             report_to=["wandb"] if self.wandb_enabled else "none",
             save_strategy=save_strategy,
-            evaluation_strategy=eval_strategy,
+            eval_strategy=eval_strategy,
             logging_steps=logging_steps,
             load_best_model_at_end=True if val_path else False,
             metric_for_best_model="eval_loss" if val_path else None,
@@ -778,6 +924,105 @@ class InfillingDiffusionTrainer:
             mask_span_length=self.mask_span_length,
         )
         return dataset.to_hf()
+
+    def _build_infilling_input(
+        self,
+        proof_with_hole: str,
+        *,
+        theorem_statement: str = "",
+        hole_token: str = "<HOLE>",
+    ) -> Optional[Tuple[List[int], int, int, int]]:
+        hole_pos = proof_with_hole.find(hole_token)
+        if hole_pos == -1:
+            return None
+
+        theorem_statement = _normalize_optional_text(theorem_statement)
+        prompt_prefix, _ = _build_infilling_prompt_prefix(
+            self.tokenizer, theorem_statement=theorem_statement
+        )
+        prompt_ids = self.tokenizer(
+            prompt_prefix,
+            add_special_tokens=False,
+            truncation=True,
+            max_length=self.max_length,
+        )["input_ids"]
+        if len(prompt_ids) + self.mask_span_length > self.max_length:
+            return None
+        available_for_proof = self.max_length - len(prompt_ids)
+
+        left_text = proof_with_hole[:hole_pos]
+        right_text = proof_with_hole[hole_pos + len(hole_token):]
+        left_ids = self.tokenizer(
+            left_text,
+            add_special_tokens=False,
+            truncation=True,
+            max_length=available_for_proof - self.mask_span_length,
+        )["input_ids"]
+        right_ids = self.tokenizer(
+            right_text,
+            add_special_tokens=False,
+            truncation=True,
+            max_length=available_for_proof - self.mask_span_length - len(left_ids),
+        )["input_ids"]
+
+        total_len = len(left_ids) + self.mask_span_length + len(right_ids)
+        if total_len > available_for_proof:
+            available_for_right = available_for_proof - len(left_ids) - self.mask_span_length
+            if available_for_right < 0:
+                return None
+            right_ids = right_ids[:available_for_right]
+
+        assistant_start = len(prompt_ids)
+        mask_start = assistant_start + len(left_ids)
+        mask_end = mask_start + self.mask_span_length
+        input_ids = (
+            prompt_ids
+            + left_ids
+            + ([self.mask_token_id] * self.mask_span_length)
+            + right_ids
+        )
+        return input_ids, assistant_start, mask_start, mask_end
+
+    def sample_infilling_tactic(
+        self,
+        proof_with_hole: str,
+        *,
+        theorem_statement: str = "",
+        num_return_sequences: int = 1,
+        steps: int = DEFAULT_DIFFUSION_STEPS,
+        temperature: float = DEFAULT_DIFFUSION_TEMPERATURE,
+        remasking: str = DEFAULT_REMASKING,
+        hole_token: str = "<HOLE>",
+    ) -> List[str]:
+        """Iteratively denoise the infilling hole and decode predicted tactic text."""
+        built = self._build_infilling_input(
+            proof_with_hole,
+            theorem_statement=theorem_statement,
+            hole_token=hole_token,
+        )
+        if built is None:
+            return []
+        input_ids, _assistant_start, mask_start, mask_end = built
+
+        x = torch.tensor(input_ids, dtype=torch.long, device=self.model.device).unsqueeze(0)
+        x = x.repeat(num_return_sequences, 1)
+        attention_mask = torch.ones_like(x)
+
+        sampled = denoise_masked_sequence(
+            model=self.model,
+            input_ids=x,
+            attention_mask=attention_mask,
+            mask_token_id=self.mask_token_id,
+            steps=steps,
+            temperature=temperature,
+            remasking=remasking,
+        )
+
+        results: List[str] = []
+        for seq in sampled.tolist():
+            predicted_span = seq[mask_start:mask_end]
+            results.append(decode_until_stop(self.tokenizer, predicted_span, self.mask_token_id))
+        return results
 
     def train(self):
         """Run training."""
