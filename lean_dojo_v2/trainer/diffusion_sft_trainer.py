@@ -693,11 +693,6 @@ class WandbQualitativeCallback(TrainerCallback):
         device = next(model.parameters()).device
         input_ids = torch.tensor(row["input_ids"], dtype=torch.long, device=device).unsqueeze(0)
         attention_mask = torch.ones_like(input_ids)
-
-        # Support both schemas:
-        # - infilling chat dataset: row has mask_start/mask_end for target span
-        # - infilling dataset: row has labels indicating the mask span
-        # - next-tactic dataset: row has assistant_start for generation region
         if "mask_start" in row and "mask_end" in row:
             mask_start = int(row["mask_start"])
             mask_end = int(row["mask_end"])
@@ -709,14 +704,15 @@ class WandbQualitativeCallback(TrainerCallback):
         elif "assistant_start" in row:
             assistant_start = int(row["assistant_start"])
             supervised_positions = list(range(assistant_start, input_ids.shape[1]))
+            if not supervised_positions:
+                return ""
             masked_input = input_ids.clone()
             masked_input[:, assistant_start:] = self.mask_token_id
         else:
-            labels = row["labels"]
-            supervised_positions = [idx for idx, label in enumerate(labels) if label != -100]
-            if not supervised_positions:
-                return ""
-            masked_input = input_ids
+            raise ValueError(
+                "Expected infilling-chat ('mask_start'/'mask_end') or next-tactic "
+                "('assistant_start') schema for qualitative sampling."
+            )
 
         sampled = denoise_masked_sequence(
             model=model,
