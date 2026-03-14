@@ -1,72 +1,75 @@
 #!/bin/bash
 #SBATCH -p expansion
-#SBATCH --time=24:00:00
-#SBATCH -c 8
+#SBATCH --time=12:00:00
+#SBATCH -c 32
 #SBATCH --mem=32G
 
 set -euo pipefail
 
+# Determine the script's location.
+# When running via sbatch, BASH_SOURCE[0] points to a copy in /var/spool/slurmd/,
+# so we detect that case and fall back to the current working directory (where
+# the script was submitted from).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ "${BASH_SOURCE[0]}" == /var/spool/slurmd/* && -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+  SCRIPT_DIR="${SLURM_SUBMIT_DIR}"
+fi
+
 REPO_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+# Cache/tmp directories default to the script directory (override with env vars)
+# Otherwise it uses default home dir which has a quota on Caltech HPC.
+CACHE_DIR="${CACHE_DIR:-${SCRIPT_DIR}/.cache/lean_dojo}"
+TMP_DIR="${TMP_DIR:-${SCRIPT_DIR}/.tmp}"
+export CACHE_DIR TMP_DIR
+mkdir -p "${CACHE_DIR}" "${TMP_DIR}"
+echo "[convert-repo] CACHE_DIR=${CACHE_DIR}"
+echo "[convert-repo] TMP_DIR=${TMP_DIR}"
+
 cd "${SCRIPT_DIR}"
 
-echo "[convert-repo] Starting APRIL materialize+trace conversion at $(date -Iseconds)"
+WORK_REPO="${SCRIPT_DIR}/april_eval_project"
 
-OUT_ROOT="${OUT_ROOT:-leandojo_repo}"
-mkdir -p "${OUT_ROOT}" "${OUT_ROOT}/failures"
+if [[ ! -e "${WORK_REPO}/.git" ]]; then
+  echo "[convert-repo] ERROR: WORK_REPO is not a git repository: ${WORK_REPO}"
+  echo "[convert-repo] Run materialize-repo.sh first to create the materialized repository."
+  exit 1
+fi
 
-TMP_BASE="${TMP_BASE:-/tmp}"
-RUN_DIR="$(mktemp -d "${TMP_BASE%/}/april_repo_trace.XXXXXX")"
-cleanup() {
-  rm -rf "${RUN_DIR}"
-}
-trap cleanup EXIT
+echo "[convert-repo] Starting conversion at $(date -Iseconds)"
+echo "[convert-repo] Using WORK_REPO=${WORK_REPO}"
 
-WORK_REPO="${RUN_DIR}/april_eval_project"
-git clone -q "${SCRIPT_DIR}/april_eval_project" "${WORK_REPO}"
-git -C "${WORK_REPO}" config user.email "materializer@local"
-git -C "${WORK_REPO}" config user.name "Materializer"
+OUTPUT_JSON="${OUTPUT_JSON:-output.json}"
+echo "[convert-repo] Output will be written to: ${OUTPUT_JSON}"
 
-for input in raw/*/*.jsonl; do
-  split="$(basename "$(dirname "${input}")")"
-  stem="$(basename "${input}" .jsonl)"
-  output="${OUT_ROOT}/${split}/${stem}.json"
-  manifest="${OUT_ROOT}/materialized/${split}/${stem}.manifest.jsonl"
-  failure_log="${OUT_ROOT}/failures/${split}/${stem}.failures.jsonl"
+mkdir -p "$(dirname "${OUTPUT_JSON}")"
 
-  mkdir -p "$(dirname "${output}")" "$(dirname "${manifest}")" "$(dirname "${failure_log}")"
+# Trace build deps to ensure files are processed even without pre-built .olean files.
+# Many APRIL proofs have errors, so we let the tracer handle them individually.
+TRACE_BUILD_DEPS="${TRACE_BUILD_DEPS:-1}"
+# Optional timeout (seconds) for `lake build` inside tracing.
+# If reached, tracing continues with partially built artifacts.
+LAKE_BUILD_TIMEOUT_SEC="${LAKE_BUILD_TIMEOUT_SEC:-1200}"
+# Continue conversion even if some materialized rows fail to compile.
+LEAN_DOJO_ALLOW_PARTIAL_BUILD="${LEAN_DOJO_ALLOW_PARTIAL_BUILD:-1}"
+export LAKE_BUILD_TIMEOUT_SEC
+export LEAN_DOJO_ALLOW_PARTIAL_BUILD
 
-  echo "[convert-repo] ${input} -> ${output}"
+export_cmd=(
+  uv run python "${REPO_DIR}/datasets/export_materialized_repo_to_leandojo.py"
+  --project-path "${WORK_REPO}"
+  --module-prefix "AprilEval.Materialized"
+  --dataset-url "https://huggingface.co/datasets/uw-math-ai/APRIL"
+  --output-json "${OUTPUT_JSON}"
+)
+if [[ "${TRACE_BUILD_DEPS}" != "0" ]]; then
+  export_cmd+=(--build-deps)
+fi
 
-  git -C "${WORK_REPO}" reset --hard -q
-  git -C "${WORK_REPO}" clean -fdq
-
-  materialize_cmd=(
-    uv run python materialize_april_repo.py
-    --input-jsonl "${input}"
-    --project-path "${WORK_REPO}"
-    --manifest-path "${manifest}"
-  )
-  if [[ -n "${MAX_EXAMPLES:-}" ]]; then
-    materialize_cmd+=(--max-examples "${MAX_EXAMPLES}")
-  fi
-  "${materialize_cmd[@]}"
-
-  git -C "${WORK_REPO}" add -A
-  if git -C "${WORK_REPO}" diff --cached --quiet; then
-    echo "[convert-repo] no materialized changes for ${input}, skipping trace"
-    echo '{"reason":"no_materialized_changes"}' > "${failure_log}"
-    continue
-  fi
-  git -C "${WORK_REPO}" commit -q -m "materialize ${split}/${stem}"
-
-  if ! uv run python "${REPO_DIR}/datasets/export_materialized_repo_to_leandojo.py" \
-    --project-path "${WORK_REPO}" \
-    --module-prefix "AprilEval.Materialized" \
-    --dataset-url "https://huggingface.co/datasets/uw-math-ai/APRIL" \
-    --output-json "${output}" ; then
-    echo "{\"reason\":\"trace_or_export_failed\",\"input\":\"${input}\"}" > "${failure_log}"
-  fi
-done
+if ! "${export_cmd[@]}"; then
+  echo "[convert-repo] ERROR: Conversion failed."
+  exit 1
+fi
 
 echo "[convert-repo] Done at $(date -Iseconds)"
+echo "[convert-repo] Output: ${OUTPUT_JSON}"
