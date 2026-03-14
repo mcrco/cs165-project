@@ -848,7 +848,7 @@ class InfillingDiffusionTrainer:
         bf16: Optional[bool] = None,
         logging_steps: int = 10,
         save_strategy: str = "epoch",
-        wandb_project: Optional[str] = "CS165Proj",
+        wandb_project: Optional[str] = "infilling",
         wandb_run_name: Optional[str] = None,
         qual_log_every_n_steps: int = 200,
         qual_num_samples_per_split: int = 64,
