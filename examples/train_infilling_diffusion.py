@@ -56,7 +56,7 @@ trainer = InfillingDiffusionTrainer(
     wandb_project=wandb_project,
     wandb_run_name=wandb_run_name,
     qual_log_every_n_steps=200,
-    qual_num_samples_per_split=8,
+    qual_num_samples_per_split=64,
 )
 
 # Run training

@@ -657,6 +657,22 @@ class WandbQualitativeCallback(TrainerCallback):
         self.val_indices = (
             self._sample_indices(eval_dataset, seed + 1) if eval_dataset is not None else []
         )
+        self._qual_columns = [
+            "split",
+            "sample_id",
+            "theorem",
+            "prompt",
+            "expected_tactic",
+            "predicted_tactic",
+            "global_step",
+            "epoch",
+        ]
+        # Keep a persistent table per split so we can compare the same
+        # examples across training steps/epochs in one view.
+        self.train_history_table = self.wandb.Table(columns=self._qual_columns)
+        self.val_history_table = (
+            self.wandb.Table(columns=self._qual_columns) if eval_dataset is not None else None
+        )
 
     def _sample_indices(self, dataset: Optional[Dataset], seed: int) -> List[int]:
         if dataset is None:
@@ -723,20 +739,15 @@ class WandbQualitativeCallback(TrainerCallback):
         dataset: Optional[Dataset],
         indices: List[int],
         step: int,
+        epoch: Optional[float],
     ):
         if dataset is None or not indices:
             return
 
-        table = self.wandb.Table(
-            columns=[
-                "split",
-                "theorem",
-                "prompt",
-                "expected_tactic",
-                "predicted_tactic",
-                "global_step",
-            ]
-        )
+        table = self.train_history_table if split == "train" else self.val_history_table
+        if table is None:
+            return
+
         for idx in indices:
             row = dataset[idx]
             full_name = row.get("full_name", "")
@@ -754,16 +765,18 @@ class WandbQualitativeCallback(TrainerCallback):
 
             table.add_data(
                 split,
+                int(idx),
                 theorem,
                 prompt,
                 expected_tactic,
                 predicted_tactic,
                 step,
+                float(epoch) if epoch is not None else None,
             )
 
         self.wandb.log({f"{split}_qualitative_samples": table}, step=step)
 
-    def _maybe_log_qualitative(self, *, model, step: int):
+    def _maybe_log_qualitative(self, *, model, step: int, epoch: Optional[float]):
         if self._last_logged_step == step:
             return
 
@@ -777,6 +790,7 @@ class WandbQualitativeCallback(TrainerCallback):
                 dataset=self.train_dataset,
                 indices=self.train_indices,
                 step=step,
+                epoch=epoch,
             )
             self._log_split(
                 model=model,
@@ -784,6 +798,7 @@ class WandbQualitativeCallback(TrainerCallback):
                 dataset=self.eval_dataset,
                 indices=self.val_indices,
                 step=step,
+                epoch=epoch,
             )
         finally:
             if was_training:
@@ -795,7 +810,11 @@ class WandbQualitativeCallback(TrainerCallback):
         if state.global_step % self.log_every_n_steps != 0:
             return
         try:
-            self._maybe_log_qualitative(model=model, step=state.global_step)
+            self._maybe_log_qualitative(
+                model=model,
+                step=state.global_step,
+                epoch=float(state.epoch) if state.epoch is not None else None,
+            )
         except Exception as exc:
             print(f"[wandb] qualitative logging failed at step {state.global_step}: {exc}")
 
@@ -803,7 +822,11 @@ class WandbQualitativeCallback(TrainerCallback):
         if model is None:
             return
         try:
-            self._maybe_log_qualitative(model=model, step=state.global_step)
+            self._maybe_log_qualitative(
+                model=model,
+                step=state.global_step,
+                epoch=float(state.epoch) if state.epoch is not None else None,
+            )
         except Exception as exc:
             print(f"[wandb] qualitative eval logging failed at step {state.global_step}: {exc}")
 
@@ -832,7 +855,7 @@ class InfillingDiffusionTrainer:
         wandb_project: Optional[str] = "CS165Proj",
         wandb_run_name: Optional[str] = None,
         qual_log_every_n_steps: int = 200,
-        qual_num_samples_per_split: int = 8,
+        qual_num_samples_per_split: int = 64,
         trust_remote_code: bool = True,
     ):
         if not train_path:
