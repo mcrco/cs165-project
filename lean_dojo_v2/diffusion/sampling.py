@@ -12,8 +12,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-DEFAULT_DIFFUSION_STEPS = 10
-DEFAULT_DIFFUSION_TEMPERATURE = 0.7
+DEFAULT_DIFFUSION_STEPS = 16
+DEFAULT_DIFFUSION_TEMPERATURE = 0.0
 DEFAULT_REMASKING = "low_confidence"
 
 
