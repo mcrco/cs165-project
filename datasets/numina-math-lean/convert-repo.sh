@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -p expansion
-#SBATCH --time=3:00:00
+#SBATCH --time=12:00:00
 #SBATCH -c 32
 #SBATCH --mem=32G
 

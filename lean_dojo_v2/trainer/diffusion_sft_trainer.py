@@ -313,3 +313,306 @@ class DiffusionSFTTrainer:
                 trainer.save_model(self.output_dir)
 
         self.tokenizer.save_pretrained(self.output_dir)
+
+
+class InfillingMDMDataset:
+    """Dataset for infilling-style training with MDM mask tokens embedded in proof context.
+
+    Each example has:
+    - input_ids: proof text with <HOLE> replaced by fixed-length <|mdm_mask|> span
+    - labels: -100 everywhere except mask positions, which have true token IDs
+    """
+
+    def __init__(
+        self,
+        data_path: str,
+        tokenizer,
+        max_length: int = 1024,
+        mask_span_length: int = 64,
+        hole_token: str = "<HOLE>",
+        mask_token: str = "<|mdm_mask|>",
+    ):
+        self.data_path = data_path
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        self.mask_span_length = mask_span_length
+        self.hole_token = hole_token
+        self.mask_token = mask_token
+
+        self.mask_token_id = tokenizer.convert_tokens_to_ids(mask_token)
+        if self.mask_token_id is None or self.mask_token_id < 0:
+            self.mask_token_id = 156895  # LLaDA MoE default
+
+        with open(data_path, encoding="utf-8") as f:
+            self.json_data = json.load(f)
+        self.data = self._process_data(self.json_data)
+
+    def _process_data(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Convert infilling examples to MDM training format."""
+        processed: List[Dict[str, Any]] = []
+        eos_id = self.tokenizer.eos_token_id
+
+        for item in data:
+            infilling = item.get("infilling", {})
+            proof_with_hole = infilling.get("proof_with_hole", "")
+            target_tactic = infilling.get("target_tactic", "").strip()
+
+            if not proof_with_hole or not target_tactic or target_tactic == "sorry":
+                continue
+
+            # Find hole position
+            hole_pos = proof_with_hole.find(self.hole_token)
+            if hole_pos == -1:
+                continue
+
+            # Split into left/right context
+            left_text = proof_with_hole[:hole_pos]
+            right_text = proof_with_hole[hole_pos + len(self.hole_token):]
+
+            # Tokenize left and right contexts
+            left_ids = self.tokenizer(
+                left_text,
+                add_special_tokens=False,
+                truncation=True,
+                max_length=self.max_length - self.mask_span_length,
+            )["input_ids"]
+
+            right_ids = self.tokenizer(
+                right_text,
+                add_special_tokens=False,
+                truncation=True,
+                max_length=self.max_length - self.mask_span_length - len(left_ids),
+            )["input_ids"]
+
+            # Check if combined length fits
+            total_len = len(left_ids) + self.mask_span_length + len(right_ids)
+            if total_len > self.max_length:
+                # Truncate right context more aggressively
+                available_for_right = self.max_length - len(left_ids) - self.mask_span_length
+                if available_for_right < 0:
+                    continue  # Left context too long, skip this example
+                right_ids = right_ids[:available_for_right]
+                total_len = len(left_ids) + self.mask_span_length + len(right_ids)
+
+            # Build input_ids: left + mask_span + right
+            mask_span = [self.mask_token_id] * self.mask_span_length
+            input_ids = left_ids + mask_span + right_ids
+
+            # Tokenize target tactic + EOS
+            target_ids = self.tokenizer(
+                target_tactic,
+                add_special_tokens=False,
+            )["input_ids"]
+            target_plus_eos = target_ids + [eos_id]
+
+            # Build labels: -100 everywhere, fill mask span with target
+            labels = [-100] * len(input_ids)
+            mask_start = len(left_ids)
+            mask_end = mask_start + self.mask_span_length
+
+            # Fill with target tactic tokens
+            for i, tid in enumerate(target_plus_eos):
+                if mask_start + i < mask_end:
+                    labels[mask_start + i] = tid
+
+            # Fill remaining mask positions with mask_token_id (model learns to keep as padding)
+            for i in range(len(target_plus_eos), self.mask_span_length):
+                if mask_start + i < mask_end:
+                    labels[mask_start + i] = self.mask_token_id
+
+            processed.append({
+                "input_ids": input_ids,
+                "labels": labels,
+            })
+
+        return processed
+
+    def to_hf(self) -> Dataset:
+        """Convert to HuggingFace Dataset."""
+        return Dataset.from_list(self.data)
+
+
+class InfillingMDMCollator:
+    """Simple padding collator for pre-masked infilling examples.
+
+    No random masking - just pads input_ids, attention_mask, and labels.
+    """
+
+    def __init__(self, tokenizer, pad_token_id: Optional[int] = None):
+        self.tokenizer = tokenizer
+        self.pad_token_id = pad_token_id if pad_token_id is not None else tokenizer.pad_token_id
+
+    def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+        """Pad and batch features."""
+        max_len = max(len(f["input_ids"]) for f in features)
+        batch_size = len(features)
+
+        input_ids = torch.full(
+            (batch_size, max_len),
+            self.pad_token_id,
+            dtype=torch.long,
+        )
+        attention_mask = torch.zeros((batch_size, max_len), dtype=torch.long)
+        labels = torch.full((batch_size, max_len), -100, dtype=torch.long)
+
+        for i, feature in enumerate(features):
+            seq_len = len(feature["input_ids"])
+            input_ids[i, :seq_len] = torch.tensor(feature["input_ids"], dtype=torch.long)
+            attention_mask[i, :seq_len] = 1
+            labels[i, :seq_len] = torch.tensor(feature["labels"], dtype=torch.long)
+
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "labels": labels,
+        }
+
+
+class InfillingDiffusionTrainer:
+    """Trainer for infilling-style diffusion training on Lean proofs.
+
+    Uses fixed-length mask spans embedded directly in the proof context.
+    """
+
+    def __init__(
+        self,
+        model_name: str = "inclusionAI/LLaDA-MoE-7B-A1B-Instruct",
+        train_path: str = "",
+        val_path: Optional[str] = None,
+        output_dir: str = "outputs/infilling-mdm",
+        epochs: float = 3.0,
+        batch_size: int = 1,
+        lr: float = 2e-5,
+        max_length: int = 1024,
+        mask_span_length: int = 64,
+        lora_config: Optional[LoraConfig] = None,
+        bf16: Optional[bool] = None,
+        logging_steps: int = 10,
+        save_strategy: str = "epoch",
+    ):
+        if not train_path:
+            raise ValueError("train_path is required")
+
+        self.model_name = model_name
+        self.train_path = train_path
+        self.val_path = val_path
+        self.output_dir = output_dir
+        self.epochs = epochs
+        self.batch_size = batch_size
+        self.lr = lr
+        self.max_length = max_length
+        self.mask_span_length = mask_span_length
+        self.lora_config = lora_config
+        self.use_lora = lora_config is not None
+        self.logging_steps = logging_steps
+        self.save_strategy = save_strategy
+
+        # Auto-detect bf16 if not specified
+        if bf16 is None:
+            bf16 = torch.cuda.is_available()
+        self.bf16 = bf16
+
+        # Load tokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
+        # Load model
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=torch.bfloat16 if self.bf16 else torch.float32,
+        )
+
+        if self.use_lora:
+            self.model = self._apply_lora()
+
+        # Get mask token ID
+        self.mask_token_id = self.tokenizer.convert_tokens_to_ids("<|mdm_mask|>")
+        if self.mask_token_id is None or self.mask_token_id < 0:
+            print(f"<|mdm_mask|> token not found in tokenizer for {model_name}.")
+            self.mask_token_id = 156895  # LLaDA MoE default
+
+        # Setup training arguments
+        eval_strategy = "epoch" if val_path else "no"
+        self.training_args = TrainingArguments(
+            output_dir=output_dir,
+            num_train_epochs=epochs,
+            per_device_train_batch_size=batch_size,
+            per_device_eval_batch_size=batch_size,
+            learning_rate=lr,
+            bf16=self.bf16,
+            fp16=False,
+            remove_unused_columns=False,
+            report_to="none",
+            save_strategy=save_strategy,
+            evaluation_strategy=eval_strategy,
+            logging_steps=logging_steps,
+            load_best_model_at_end=True if val_path else False,
+            metric_for_best_model="eval_loss" if val_path else None,
+        )
+
+    def _apply_lora(self):
+        """Apply LoRA to the model."""
+        if self.lora_config is None:
+            raise ValueError("LoRA config is required when use_lora is True")
+        model = get_peft_model(self.model, self.lora_config)
+        model.print_trainable_parameters()
+        return model
+
+    def _load_dataset(self, data_path: str) -> Dataset:
+        """Load and process dataset."""
+        dataset = InfillingMDMDataset(
+            data_path=data_path,
+            tokenizer=self.tokenizer,
+            max_length=self.max_length,
+            mask_span_length=self.mask_span_length,
+        )
+        return dataset.to_hf()
+
+    def train(self):
+        """Run training."""
+        # Load datasets
+        print(f"Loading training data from {self.train_path}")
+        train_dataset = self._load_dataset(self.train_path)
+        print(f"Loaded {len(train_dataset)} training examples")
+
+        eval_dataset = None
+        if self.val_path:
+            print(f"Loading validation data from {self.val_path}")
+            eval_dataset = self._load_dataset(self.val_path)
+            print(f"Loaded {len(eval_dataset)} validation examples")
+
+        # Create collator
+        data_collator = InfillingMDMCollator(
+            tokenizer=self.tokenizer,
+            pad_token_id=self.tokenizer.pad_token_id,
+        )
+
+        # Create trainer
+        trainer = MdlmTrainer(
+            model=self.model,
+            args=self.training_args,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+            data_collator=data_collator,
+            tokenizer=self.tokenizer,
+        )
+
+        # Train
+        print("Starting training...")
+        trainer.train()
+
+        # Save
+        print(f"Saving model to {self.output_dir}")
+        if self.use_lora:
+            self.model.save_pretrained(self.output_dir)
+        else:
+            trainer.save_model(self.output_dir)
+        self.tokenizer.save_pretrained(self.output_dir)
+
+        # Print summary
+        print("\nTraining complete!")
+        print(f"  Train examples: {len(train_dataset)}")
+        if eval_dataset:
+            print(f"  Val examples: {len(eval_dataset)}")
+        print(f"  Output: {self.output_dir}")

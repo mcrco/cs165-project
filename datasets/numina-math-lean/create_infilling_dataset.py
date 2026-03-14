@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import re
 import signal
 import subprocess
@@ -211,6 +212,147 @@ def parse_tactics_from_ast(ast_json_path: Path, code: str) -> list[dict[str, Any
     return tactics
 
 
+def build_char_to_byte_offsets(text: str) -> list[int]:
+    """Map each character boundary to its UTF-8 byte offset."""
+    offsets = [0]
+    total = 0
+    for ch in text:
+        total += len(ch.encode("utf-8"))
+        offsets.append(total)
+    return offsets
+
+
+def parse_tactics_from_raw_text(code: str) -> list[dict[str, Any]]:
+    """Parse tactics using a comment-aware raw-text heuristic.
+
+    This mode scans lines after `:= by`, strips comments, and treats each
+    non-empty code line as one tactic candidate.
+    """
+    theorem_match = re.search(r"\b(?:theorem|lemma)\b\s+[A-Za-z0-9_'.]+", code)
+    if theorem_match is None:
+        return []
+
+    by_match = re.search(r":=\s*by\b", code[theorem_match.end() :])
+    if by_match is None:
+        return []
+
+    proof_start = theorem_match.end() + by_match.end()
+    char_to_byte = build_char_to_byte_offsets(code)
+
+    tactics: list[dict[str, Any]] = []
+    seen_spans: set[tuple[int, int]] = set()
+
+    block_comment_depth = 0
+    in_string = False
+    escaped = False
+    line_first_non_ws_code: int | None = None
+    line_last_non_ws_code: int | None = None
+
+    def flush_line() -> None:
+        nonlocal line_first_non_ws_code, line_last_non_ws_code
+        if line_first_non_ws_code is None or line_last_non_ws_code is None:
+            line_first_non_ws_code = None
+            line_last_non_ws_code = None
+            return
+
+        start_char = line_first_non_ws_code
+        end_char_exclusive = line_last_non_ws_code + 1
+        line_first_non_ws_code = None
+        line_last_non_ws_code = None
+
+        tactic_text = code[start_char:end_char_exclusive].strip()
+        if not tactic_text or tactic_text == "sorry":
+            return
+        if "·" in tactic_text:
+            return
+
+        sig = (start_char, end_char_exclusive)
+        if sig in seen_spans:
+            return
+        seen_spans.add(sig)
+
+        tactics.append(
+            {
+                "tactic": tactic_text,
+                "annotated_tactic": [tactic_text, []],
+                "state_before": "",
+                "state_after": "",
+                "start_byte": char_to_byte[start_char],
+                "end_byte": char_to_byte[end_char_exclusive],
+            }
+        )
+
+    i = proof_start
+    n = len(code)
+    while i < n:
+        ch = code[i]
+        nxt = code[i + 1] if i + 1 < n else ""
+
+        if ch == "\n":
+            flush_line()
+            i += 1
+            continue
+
+        if block_comment_depth > 0:
+            if ch == "/" and nxt == "-":
+                block_comment_depth += 1
+                i += 2
+                continue
+            if ch == "-" and nxt == "/":
+                block_comment_depth -= 1
+                i += 2
+                continue
+            i += 1
+            continue
+
+        if in_string:
+            if not ch.isspace():
+                if line_first_non_ws_code is None:
+                    line_first_non_ws_code = i
+                line_last_non_ws_code = i
+            if ch == '"' and not escaped:
+                in_string = False
+                escaped = False
+            elif ch == "\\" and not escaped:
+                escaped = True
+            else:
+                escaped = False
+            i += 1
+            continue
+
+        if ch == "-" and nxt == "-":
+            new_line_idx = code.find("\n", i)
+            if new_line_idx == -1:
+                i = n
+            else:
+                i = new_line_idx
+            continue
+
+        if ch == "/" and nxt == "-":
+            block_comment_depth = 1
+            i += 2
+            continue
+
+        if ch == '"':
+            in_string = True
+            escaped = False
+            if line_first_non_ws_code is None:
+                line_first_non_ws_code = i
+            line_last_non_ws_code = i
+            i += 1
+            continue
+
+        if not ch.isspace():
+            if line_first_non_ws_code is None:
+                line_first_non_ws_code = i
+            line_last_non_ws_code = i
+
+        i += 1
+
+    flush_line()
+    return tactics
+
+
 def create_proof_with_hole(code: str, tactic_info: dict[str, Any], hole_token: str) -> str:
     """Replace a tactic at specific byte positions with the hole token."""
     code_bytes = code.encode("utf-8")
@@ -265,11 +407,51 @@ def create_infilling_examples(
     return examples
 
 
+def split_examples_train_val(
+    examples: list[dict[str, Any]],
+    val_ratio: float,
+    seed: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split examples into train/val at theorem level."""
+    if val_ratio <= 0:
+        return examples, []
+    if val_ratio >= 1:
+        return [], examples
+
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for ex in examples:
+        key = (str(ex.get("file_path", "")), str(ex.get("full_name", "")))
+        groups.setdefault(key, []).append(ex)
+
+    theorem_keys = list(groups.keys())
+    rng = random.Random(seed)
+    rng.shuffle(theorem_keys)
+
+    num_theorems = len(theorem_keys)
+    num_val_theorems = int(num_theorems * val_ratio)
+    if num_val_theorems == 0 and num_theorems > 1:
+        num_val_theorems = 1
+    if num_val_theorems >= num_theorems and num_theorems > 1:
+        num_val_theorems = num_theorems - 1
+
+    val_key_set = set(theorem_keys[:num_val_theorems])
+    train_examples: list[dict[str, Any]] = []
+    val_examples: list[dict[str, Any]] = []
+    for ex in examples:
+        key = (str(ex.get("file_path", "")), str(ex.get("full_name", "")))
+        if key in val_key_set:
+            val_examples.append(ex)
+        else:
+            train_examples.append(ex)
+    return train_examples, val_examples
+
+
 def process_file(
     manifest_entry: dict[str, Any],
     project_path: Path,
     extract_timeout: int,
     hole_token: str,
+    parser: str,
 ) -> tuple[int, list[dict[str, Any]] | None, dict[str, Any] | None]:
     """Process a single materialized file and return infilling examples or error info."""
     row_idx = manifest_entry["row_idx"]
@@ -307,94 +489,110 @@ def process_file(
             },
         )
 
-    # Run ExtractData to get tactic information
-    try:
-        returncode, stdout, stderr = run_extract_data(
-            project_path,
-            relative_path,
-            timeout_seconds=extract_timeout,
-        )
-    except subprocess.TimeoutExpired as ex:
-        timeout_stdout = (ex.stdout or "").strip()
-        timeout_stderr = (ex.stderr or "").strip()
-        detail_parts: list[str] = [str(ex)]
-        if timeout_stderr:
-            detail_parts.append(f"stderr:\n{timeout_stderr}")
-        if timeout_stdout:
-            detail_parts.append(f"stdout:\n{timeout_stdout}")
-        detail = "\n\n".join(detail_parts)[:2000]
-        return (
-            row_idx,
-            None,
-            {
-                "row_idx": row_idx,
-                "reason": "extractdata_timeout",
-                "uuid": uuid,
-                "module": module_name,
-                "detail": detail,
-            },
-        )
-    except Exception as ex:
-        return (
-            row_idx,
-            None,
-            {
-                "row_idx": row_idx,
-                "reason": f"extractdata_exception:{type(ex).__name__}",
-                "uuid": uuid,
-                "module": module_name,
-                "detail": str(ex),
-            },
-        )
+    if parser == "raw":
+        try:
+            tactics = parse_tactics_from_raw_text(code)
+        except Exception as ex:
+            return (
+                row_idx,
+                None,
+                {
+                    "row_idx": row_idx,
+                    "reason": f"parse_raw_text_exception:{type(ex).__name__}",
+                    "uuid": uuid,
+                    "module": module_name,
+                    "detail": str(ex),
+                },
+            )
+    else:
+        # Run ExtractData to get tactic information
+        try:
+            returncode, stdout, stderr = run_extract_data(
+                project_path,
+                relative_path,
+                timeout_seconds=extract_timeout,
+            )
+        except subprocess.TimeoutExpired as ex:
+            timeout_stdout = (ex.stdout or "").strip()
+            timeout_stderr = (ex.stderr or "").strip()
+            detail_parts: list[str] = [str(ex)]
+            if timeout_stderr:
+                detail_parts.append(f"stderr:\n{timeout_stderr}")
+            if timeout_stdout:
+                detail_parts.append(f"stdout:\n{timeout_stdout}")
+            detail = "\n\n".join(detail_parts)[:2000]
+            return (
+                row_idx,
+                None,
+                {
+                    "row_idx": row_idx,
+                    "reason": "extractdata_timeout",
+                    "uuid": uuid,
+                    "module": module_name,
+                    "detail": detail,
+                },
+            )
+        except Exception as ex:
+            return (
+                row_idx,
+                None,
+                {
+                    "row_idx": row_idx,
+                    "reason": f"extractdata_exception:{type(ex).__name__}",
+                    "uuid": uuid,
+                    "module": module_name,
+                    "detail": str(ex),
+                },
+            )
 
-    if returncode != 0:
-        stderr = (stderr or "").strip()
-        stdout = (stdout or "").strip()
-        detail_parts: list[str] = []
-        if stderr:
-            detail_parts.append(f"stderr:\n{stderr}")
-        if stdout:
-            detail_parts.append(f"stdout:\n{stdout}")
-        detail = "\n\n".join(detail_parts)[:2000]
-        rec: dict[str, Any] = {
-            "row_idx": row_idx,
-            "reason": "extractdata_process_error",
-            "uuid": uuid,
-            "module": module_name,
-        }
-        if detail:
-            rec["detail"] = detail
-        return row_idx, None, rec
-
-    # Find and parse the AST JSON
-    ast_json_path = get_ast_json_path(project_path, relative_path)
-    if ast_json_path is None:
-        return (
-            row_idx,
-            None,
-            {
+        if returncode != 0:
+            stderr = (stderr or "").strip()
+            stdout = (stdout or "").strip()
+            detail_parts: list[str] = []
+            if stderr:
+                detail_parts.append(f"stderr:\n{stderr}")
+            if stdout:
+                detail_parts.append(f"stdout:\n{stdout}")
+            detail = "\n\n".join(detail_parts)[:2000]
+            rec: dict[str, Any] = {
                 "row_idx": row_idx,
-                "reason": "missing_ast_json",
+                "reason": "extractdata_process_error",
                 "uuid": uuid,
                 "module": module_name,
-                "detail": str(relative_path),
-            },
-        )
+            }
+            if detail:
+                rec["detail"] = detail
+            return row_idx, None, rec
 
-    try:
-        tactics = parse_tactics_from_ast(ast_json_path, code)
-    except Exception as ex:
-        return (
-            row_idx,
-            None,
-            {
-                "row_idx": row_idx,
-                "reason": f"parse_ast_json_exception:{type(ex).__name__}",
-                "uuid": uuid,
-                "module": module_name,
-                "detail": str(ex),
-            },
-        )
+        # Find and parse the AST JSON
+        ast_json_path = get_ast_json_path(project_path, relative_path)
+        if ast_json_path is None:
+            return (
+                row_idx,
+                None,
+                {
+                    "row_idx": row_idx,
+                    "reason": "missing_ast_json",
+                    "uuid": uuid,
+                    "module": module_name,
+                    "detail": str(relative_path),
+                },
+            )
+
+        try:
+            tactics = parse_tactics_from_ast(ast_json_path, code)
+        except Exception as ex:
+            return (
+                row_idx,
+                None,
+                {
+                    "row_idx": row_idx,
+                    "reason": f"parse_ast_json_exception:{type(ex).__name__}",
+                    "uuid": uuid,
+                    "module": module_name,
+                    "detail": str(ex),
+                },
+            )
 
     if not tactics:
         return (
@@ -455,7 +653,12 @@ def main() -> None:
         "--output-json",
         type=Path,
         default=DEFAULT_OUTPUT_JSON,
-        help=f"Output JSON path for infilling examples (default: {DEFAULT_OUTPUT_JSON})",
+        help=(
+            "Base output JSON path. If --val-ratio > 0, writes "
+            "<stem>.train<suffix> and <stem>.val<suffix>; otherwise writes "
+            "the full dataset to this path "
+            f"(default: {DEFAULT_OUTPUT_JSON})"
+        ),
     )
     parser.add_argument(
         "--max-theorems",
@@ -499,6 +702,25 @@ def main() -> None:
         default=HOLE_TOKEN,
         help=f"Token to use for holes (default: {HOLE_TOKEN})",
     )
+    parser.add_argument(
+        "--parser",
+        type=str,
+        choices=["ast", "raw"],
+        default="ast",
+        help="Tactic parser backend: ast (Lean extractor) or raw (text heuristic)",
+    )
+    parser.add_argument(
+        "--val-ratio",
+        type=float,
+        default=0.0,
+        help="Validation split ratio in [0, 1). 0 disables split (default: 0.0)",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Random seed used for deterministic train/val split (default: 0)",
+    )
     args = parser.parse_args()
 
     # Load manifest
@@ -521,6 +743,8 @@ def main() -> None:
 
     if args.jobs < 1:
         raise ValueError("--jobs must be >= 1")
+    if args.val_ratio < 0 or args.val_ratio >= 1:
+        raise ValueError("--val-ratio must be in [0, 1)")
 
     progress = tqdm(
         total=len(manifest),
@@ -552,6 +776,7 @@ def main() -> None:
                     args.project_path,
                     args.extract_timeout,
                     args.hole_token,
+                    args.parser,
                 )
             )
             progress.update(1)
@@ -570,6 +795,7 @@ def main() -> None:
                     args.project_path,
                     args.extract_timeout,
                     args.hole_token,
+                    args.parser,
                 )
                 for entry in manifest
             ]
@@ -590,9 +816,30 @@ def main() -> None:
     failure_rows.sort(key=lambda rec: rec["row_idx"])
 
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
-    args.output_json.write_text(
-        json.dumps(all_examples, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    if args.val_ratio > 0:
+        train_examples, val_examples = split_examples_train_val(
+            all_examples, args.val_ratio, args.seed
+        )
+        train_path = args.output_json.with_name(
+            f"{args.output_json.stem}.train{args.output_json.suffix}"
+        )
+        val_path = args.output_json.with_name(
+            f"{args.output_json.stem}.val{args.output_json.suffix}"
+        )
+        train_path.write_text(
+            json.dumps(train_examples, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        val_path.write_text(
+            json.dumps(val_examples, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    else:
+        train_examples = all_examples
+        val_examples: list[dict[str, Any]] = []
+        train_path = args.output_json
+        val_path = None
+        args.output_json.write_text(
+            json.dumps(all_examples, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
 
     if args.failure_log is not None:
         args.failure_log.parent.mkdir(parents=True, exist_ok=True)
@@ -607,7 +854,17 @@ def main() -> None:
     print(f"Theorems with infilling examples: {num_theorems_with_examples}")
     print(f"Total infilling examples: {total_examples}")
     print(f"Failed theorems: {num_failed}")
-    print(f"Wrote: {args.output_json}")
+    if args.val_ratio > 0:
+        print(
+            f"Train examples: {len(train_examples)} | "
+            f"Val examples: {len(val_examples)} | "
+            f"val_ratio={args.val_ratio} seed={args.seed}"
+        )
+        print(f"Wrote train: {train_path}")
+        if val_path is not None:
+            print(f"Wrote val: {val_path}")
+    else:
+        print(f"Wrote: {args.output_json}")
 
     if failure_reasons:
         print("Failure reasons:")
