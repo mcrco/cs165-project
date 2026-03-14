@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -9,7 +10,13 @@ import torch
 import torch.nn.functional as F
 from datasets import Dataset
 from peft import LoraConfig, get_peft_model
-from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    Trainer,
+    TrainerCallback,
+    TrainingArguments,
+)
 
 from lean_dojo_v2.database import DynamicDatabase
 from lean_dojo_v2.lean_dojo.data_extraction.lean import LeanGitRepo
@@ -221,6 +228,7 @@ class DiffusionSFTTrainer:
         min_mask_ratio: float = 0.01,
         max_mask_ratio: float = 1.0,
         lora_config: Optional[LoraConfig] = None,
+        trust_remote_code: bool = True,
     ):
         self.model_name = model_name
         self.output_dir = output_dir
@@ -229,14 +237,18 @@ class DiffusionSFTTrainer:
         self.max_mask_ratio = max_mask_ratio
         self.lora_config = lora_config
         self.use_lora = lora_config is not None
+        self.trust_remote_code = trust_remote_code
 
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_name, use_fast=True, trust_remote_code=self.trust_remote_code
+        )
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
             torch_dtype=torch.bfloat16,
+            trust_remote_code=self.trust_remote_code,
         )
 
         if self.use_lora:
@@ -423,6 +435,11 @@ class InfillingMDMDataset:
             processed.append({
                 "input_ids": input_ids,
                 "labels": labels,
+                "full_name": item.get("full_name", ""),
+                "theorem_statement": item.get("theorem_statement", ""),
+                "proof_with_hole": proof_with_hole,
+                "target_tactic": target_tactic,
+                "state_before_hole": infilling.get("state_before_hole", ""),
             })
 
         return processed
@@ -468,6 +485,169 @@ class InfillingMDMCollator:
         }
 
 
+class WandbQualitativeCallback(TrainerCallback):
+    """Periodically log qualitative train/val samples to Weights & Biases."""
+
+    def __init__(
+        self,
+        *,
+        wandb_module,
+        tokenizer,
+        mask_token_id: int,
+        train_dataset: Dataset,
+        eval_dataset: Optional[Dataset],
+        log_every_n_steps: int,
+        num_samples_per_split: int,
+        seed: int = 0,
+    ):
+        self.wandb = wandb_module
+        self.tokenizer = tokenizer
+        self.mask_token_id = mask_token_id
+        self.train_dataset = train_dataset
+        self.eval_dataset = eval_dataset
+        self.log_every_n_steps = max(1, int(log_every_n_steps))
+        self.num_samples_per_split = max(1, int(num_samples_per_split))
+        self.seed = seed
+        self._last_logged_step: Optional[int] = None
+
+        self.train_indices = self._sample_indices(train_dataset, seed)
+        self.val_indices = (
+            self._sample_indices(eval_dataset, seed + 1) if eval_dataset is not None else []
+        )
+
+    def _sample_indices(self, dataset: Optional[Dataset], seed: int) -> List[int]:
+        if dataset is None:
+            return []
+        n = len(dataset)
+        if n == 0:
+            return []
+        k = min(self.num_samples_per_split, n)
+        if k == n:
+            return list(range(n))
+        rng = random.Random(seed)
+        return sorted(rng.sample(range(n), k))
+
+    def _decode_predicted_tactic(self, token_ids: List[int]) -> str:
+        cleaned: List[int] = []
+        eos_id = self.tokenizer.eos_token_id
+        pad_id = self.tokenizer.pad_token_id
+        for token_id in token_ids:
+            if eos_id is not None and token_id == eos_id:
+                break
+            if token_id == self.mask_token_id:
+                break
+            if pad_id is not None and token_id == pad_id:
+                break
+            cleaned.append(token_id)
+        if not cleaned:
+            return ""
+        return self.tokenizer.decode(cleaned, skip_special_tokens=True).strip()
+
+    def _predict_tactic(self, model, row: Dict[str, Any]) -> str:
+        device = next(model.parameters()).device
+        input_ids = torch.tensor(row["input_ids"], dtype=torch.long, device=device).unsqueeze(0)
+        attention_mask = torch.ones_like(input_ids)
+        labels = row["labels"]
+        supervised_positions = [idx for idx, label in enumerate(labels) if label != -100]
+        if not supervised_positions:
+            return ""
+
+        with torch.no_grad():
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+        predicted_ids = outputs.logits.argmax(dim=-1)[0].tolist()
+        predicted_span = [predicted_ids[pos] for pos in supervised_positions]
+        return self._decode_predicted_tactic(predicted_span)
+
+    def _log_split(
+        self,
+        *,
+        model,
+        split: str,
+        dataset: Optional[Dataset],
+        indices: List[int],
+        step: int,
+    ):
+        if dataset is None or not indices:
+            return
+
+        table = self.wandb.Table(
+            columns=[
+                "split",
+                "theorem",
+                "prompt",
+                "expected_tactic",
+                "predicted_tactic",
+                "global_step",
+            ]
+        )
+        for idx in indices:
+            row = dataset[idx]
+            full_name = row.get("full_name", "")
+            theorem_statement = row.get("theorem_statement", "")
+            theorem = full_name.strip()
+            if theorem_statement:
+                theorem = f"{theorem}: {theorem_statement}" if theorem else theorem_statement
+
+            prompt = row.get("proof_with_hole", "")
+            expected_tactic = row.get("target_tactic", "")
+            predicted_tactic = self._predict_tactic(model, row)
+
+            table.add_data(
+                split,
+                theorem,
+                prompt,
+                expected_tactic,
+                predicted_tactic,
+                step,
+            )
+
+        self.wandb.log({f"{split}_qualitative_samples": table}, step=step)
+
+    def _maybe_log_qualitative(self, *, model, step: int):
+        if self._last_logged_step == step:
+            return
+
+        self._last_logged_step = step
+        was_training = model.training
+        model.eval()
+        try:
+            self._log_split(
+                model=model,
+                split="train",
+                dataset=self.train_dataset,
+                indices=self.train_indices,
+                step=step,
+            )
+            self._log_split(
+                model=model,
+                split="val",
+                dataset=self.eval_dataset,
+                indices=self.val_indices,
+                step=step,
+            )
+        finally:
+            if was_training:
+                model.train()
+
+    def on_step_end(self, args, state, control, model=None, **kwargs):
+        if model is None or state.global_step <= 0:
+            return
+        if state.global_step % self.log_every_n_steps != 0:
+            return
+        try:
+            self._maybe_log_qualitative(model=model, step=state.global_step)
+        except Exception as exc:
+            print(f"[wandb] qualitative logging failed at step {state.global_step}: {exc}")
+
+    def on_evaluate(self, args, state, control, model=None, **kwargs):
+        if model is None:
+            return
+        try:
+            self._maybe_log_qualitative(model=model, step=state.global_step)
+        except Exception as exc:
+            print(f"[wandb] qualitative eval logging failed at step {state.global_step}: {exc}")
+
+
 class InfillingDiffusionTrainer:
     """Trainer for infilling-style diffusion training on Lean proofs.
 
@@ -489,6 +669,11 @@ class InfillingDiffusionTrainer:
         bf16: Optional[bool] = None,
         logging_steps: int = 10,
         save_strategy: str = "epoch",
+        wandb_project: Optional[str] = "CS165Proj",
+        wandb_run_name: Optional[str] = None,
+        qual_log_every_n_steps: int = 200,
+        qual_num_samples_per_split: int = 8,
+        trust_remote_code: bool = True,
     ):
         if not train_path:
             raise ValueError("train_path is required")
@@ -506,6 +691,12 @@ class InfillingDiffusionTrainer:
         self.use_lora = lora_config is not None
         self.logging_steps = logging_steps
         self.save_strategy = save_strategy
+        self.wandb_project = wandb_project
+        self.wandb_run_name = wandb_run_name
+        self.qual_log_every_n_steps = qual_log_every_n_steps
+        self.qual_num_samples_per_split = qual_num_samples_per_split
+        self.wandb_enabled = bool(wandb_project)
+        self.trust_remote_code = trust_remote_code
 
         # Auto-detect bf16 if not specified
         if bf16 is None:
@@ -513,7 +704,9 @@ class InfillingDiffusionTrainer:
         self.bf16 = bf16
 
         # Load tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_name, use_fast=True, trust_remote_code=self.trust_remote_code
+        )
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
@@ -521,6 +714,7 @@ class InfillingDiffusionTrainer:
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
             torch_dtype=torch.bfloat16 if self.bf16 else torch.float32,
+            trust_remote_code=self.trust_remote_code,
         )
 
         if self.use_lora:
@@ -543,12 +737,13 @@ class InfillingDiffusionTrainer:
             bf16=self.bf16,
             fp16=False,
             remove_unused_columns=False,
-            report_to="none",
+            report_to=["wandb"] if self.wandb_enabled else "none",
             save_strategy=save_strategy,
             evaluation_strategy=eval_strategy,
             logging_steps=logging_steps,
             load_best_model_at_end=True if val_path else False,
             metric_for_best_model="eval_loss" if val_path else None,
+            run_name=wandb_run_name,
         )
 
     def _apply_lora(self):
@@ -571,6 +766,36 @@ class InfillingDiffusionTrainer:
 
     def train(self):
         """Run training."""
+        wandb_module = None
+        if self.wandb_enabled:
+            try:
+                import wandb  # type: ignore
+            except ImportError as exc:
+                raise ImportError(
+                    "wandb logging is enabled but wandb is not installed. "
+                    "Install it with `pip install wandb`."
+                ) from exc
+
+            wandb.init(
+                project=self.wandb_project,
+                name=self.wandb_run_name,
+                config={
+                    "model_name": self.model_name,
+                    "train_path": self.train_path,
+                    "val_path": self.val_path,
+                    "output_dir": self.output_dir,
+                    "epochs": self.epochs,
+                    "batch_size": self.batch_size,
+                    "learning_rate": self.lr,
+                    "max_length": self.max_length,
+                    "mask_span_length": self.mask_span_length,
+                    "qual_log_every_n_steps": self.qual_log_every_n_steps,
+                    "qual_num_samples_per_split": self.qual_num_samples_per_split,
+                    "use_lora": self.use_lora,
+                },
+            )
+            wandb_module = wandb
+
         # Load datasets
         print(f"Loading training data from {self.train_path}")
         train_dataset = self._load_dataset(self.train_path)
@@ -588,6 +813,20 @@ class InfillingDiffusionTrainer:
             pad_token_id=self.tokenizer.pad_token_id,
         )
 
+        callbacks = []
+        if self.wandb_enabled and wandb_module is not None:
+            callbacks.append(
+                WandbQualitativeCallback(
+                    wandb_module=wandb_module,
+                    tokenizer=self.tokenizer,
+                    mask_token_id=self.mask_token_id,
+                    train_dataset=train_dataset,
+                    eval_dataset=eval_dataset,
+                    log_every_n_steps=self.qual_log_every_n_steps,
+                    num_samples_per_split=self.qual_num_samples_per_split,
+                )
+            )
+
         # Create trainer
         trainer = MdlmTrainer(
             model=self.model,
@@ -596,23 +835,27 @@ class InfillingDiffusionTrainer:
             eval_dataset=eval_dataset,
             data_collator=data_collator,
             tokenizer=self.tokenizer,
+            callbacks=callbacks,
         )
+        try:
+            # Train
+            print("Starting training...")
+            trainer.train()
 
-        # Train
-        print("Starting training...")
-        trainer.train()
+            # Save
+            print(f"Saving model to {self.output_dir}")
+            if self.use_lora:
+                self.model.save_pretrained(self.output_dir)
+            else:
+                trainer.save_model(self.output_dir)
+            self.tokenizer.save_pretrained(self.output_dir)
 
-        # Save
-        print(f"Saving model to {self.output_dir}")
-        if self.use_lora:
-            self.model.save_pretrained(self.output_dir)
-        else:
-            trainer.save_model(self.output_dir)
-        self.tokenizer.save_pretrained(self.output_dir)
-
-        # Print summary
-        print("\nTraining complete!")
-        print(f"  Train examples: {len(train_dataset)}")
-        if eval_dataset:
-            print(f"  Val examples: {len(eval_dataset)}")
-        print(f"  Output: {self.output_dir}")
+            # Print summary
+            print("\nTraining complete!")
+            print(f"  Train examples: {len(train_dataset)}")
+            if eval_dataset:
+                print(f"  Val examples: {len(eval_dataset)}")
+            print(f"  Output: {self.output_dir}")
+        finally:
+            if wandb_module is not None and wandb_module.run is not None:
+                wandb_module.finish()

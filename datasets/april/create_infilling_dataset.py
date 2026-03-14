@@ -890,9 +890,6 @@ def main() -> None:
             json.dumps(all_examples, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         val_path = None
-        args.output_json.write_text(
-            json.dumps(all_examples, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
 
     if args.failure_log is not None:
         args.failure_log.parent.mkdir(parents=True, exist_ok=True)
@@ -903,6 +900,7 @@ def main() -> None:
     # Count unique theorems across all examples
     total_examples = len(all_examples)
     num_theorems = len({(ex.get("file_path"), ex.get("full_name")) for ex in all_examples})
+    num_failed = len(failure_rows)
 
     print(f"\nSummary:")
     print(f"  Total infilling examples: {total_examples}")
