@@ -23,6 +23,19 @@ from lean_dojo_v2.lean_dojo.data_extraction.lean import LeanGitRepo
 from lean_dojo_v2.utils import remove_marks
 
 
+def _ensure_prepare_inputs_for_generation(model) -> None:
+    """PEFT expects this method for CAUSAL_LM wrappers on some custom models."""
+    if hasattr(model, "prepare_inputs_for_generation"):
+        return
+
+    def _prepare_inputs_for_generation(input_ids, **kwargs):
+        model_inputs = {"input_ids": input_ids}
+        model_inputs.update(kwargs)
+        return model_inputs
+
+    model.prepare_inputs_for_generation = _prepare_inputs_for_generation  # type: ignore[attr-defined]
+
+
 class DiffusionSFTDataset:
     """Builds next-tactic SFT examples for diffusion-style training.
 
@@ -282,6 +295,7 @@ class DiffusionSFTTrainer:
     def _apply_lora(self):
         if self.lora_config is None:
             raise ValueError("LoRA config is required when use_lora is True")
+        _ensure_prepare_inputs_for_generation(self.model)
         model = get_peft_model(self.model, self.lora_config)
         model.print_trainable_parameters()
         return model
@@ -750,6 +764,7 @@ class InfillingDiffusionTrainer:
         """Apply LoRA to the model."""
         if self.lora_config is None:
             raise ValueError("LoRA config is required when use_lora is True")
+        _ensure_prepare_inputs_for_generation(self.model)
         model = get_peft_model(self.model, self.lora_config)
         model.print_trainable_parameters()
         return model
