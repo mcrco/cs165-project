@@ -17,6 +17,7 @@ from transformers import (
     TrainerCallback,
     TrainingArguments,
 )
+from transformers.trainer_callback import PrinterCallback, ProgressCallback
 
 from lean_dojo_v2.database import DynamicDatabase
 from lean_dojo_v2.diffusion import (
@@ -270,6 +271,13 @@ class MdlmTrainer(Trainer):
             ignore_index=-100,
         )
         return (loss, outputs) if return_outputs else loss
+
+
+class QuietProgressCallback(ProgressCallback):
+    """Keep tqdm progress bars without printing per-step metric dicts."""
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        return
 
 
 class DiffusionSFTTrainer:
@@ -639,6 +647,8 @@ class WandbQualitativeCallback(TrainerCallback):
         sampling_temperature: float = DEFAULT_DIFFUSION_TEMPERATURE,
         sampling_remasking: str = DEFAULT_REMASKING,
         seed: int = 0,
+        log_history_table: bool = True,
+        log_snapshot_table: bool = True,
     ):
         self.wandb = wandb_module
         self.tokenizer = tokenizer
@@ -651,6 +661,8 @@ class WandbQualitativeCallback(TrainerCallback):
         self.sampling_temperature = float(sampling_temperature)
         self.sampling_remasking = sampling_remasking
         self.seed = seed
+        self.log_history_table = bool(log_history_table)
+        self.log_snapshot_table = bool(log_snapshot_table)
         self._last_logged_step: Optional[int] = None
 
         self.train_indices = self._sample_indices(train_dataset, seed)
@@ -667,11 +679,15 @@ class WandbQualitativeCallback(TrainerCallback):
             "global_step",
             "epoch",
         ]
-        # Keep a persistent table per split so we can compare the same
-        # examples across training steps/epochs in one view.
-        self.train_history_table = self.wandb.Table(columns=self._qual_columns)
+        # Keep persistent tables per split so repeated logs append rows
+        # (same sample_id at different global_step values).
+        self.train_history_table = (
+            self.wandb.Table(columns=self._qual_columns) if self.log_history_table else None
+        )
         self.val_history_table = (
-            self.wandb.Table(columns=self._qual_columns) if eval_dataset is not None else None
+            self.wandb.Table(columns=self._qual_columns)
+            if (self.log_history_table and eval_dataset is not None)
+            else None
         )
 
     def _sample_indices(self, dataset: Optional[Dataset], seed: int) -> List[int]:
@@ -740,10 +756,13 @@ class WandbQualitativeCallback(TrainerCallback):
         if dataset is None or not indices:
             return
 
-        table = self.train_history_table if split == "train" else self.val_history_table
-        if table is None:
+        history_table = self.train_history_table if split == "train" else self.val_history_table
+        if not self.log_history_table and not self.log_snapshot_table:
             return
 
+        snapshot_table = (
+            self.wandb.Table(columns=self._qual_columns) if self.log_snapshot_table else None
+        )
         for idx in indices:
             row = dataset[idx]
             full_name = row.get("full_name", "")
@@ -759,7 +778,7 @@ class WandbQualitativeCallback(TrainerCallback):
             expected_tactic = row.get("target_tactic", "")
             predicted_tactic = self._predict_tactic(model, row)
 
-            table.add_data(
+            record = (
                 split,
                 int(idx),
                 theorem,
@@ -769,8 +788,18 @@ class WandbQualitativeCallback(TrainerCallback):
                 step,
                 float(epoch) if epoch is not None else None,
             )
+            if history_table is not None:
+                history_table.add_data(*record)
+            if snapshot_table is not None:
+                snapshot_table.add_data(*record)
 
-        self.wandb.log({f"{split}_qualitative_samples": table}, step=step)
+        payload: Dict[str, Any] = {}
+        if history_table is not None:
+            payload[f"{split}_qualitative_samples"] = history_table
+        if snapshot_table is not None:
+            payload[f"{split}_qualitative_samples_snapshot"] = snapshot_table
+        if payload:
+            self.wandb.log(payload, step=step)
 
     def _maybe_log_qualitative(self, *, model, step: int, epoch: Optional[float]):
         if self._last_logged_step == step:
@@ -1116,6 +1145,10 @@ class InfillingDiffusionTrainer:
             tokenizer=self.tokenizer,
             callbacks=callbacks,
         )
+        # Keep tqdm with dummy quiet callback but suppress raw metric-dict prints from HF callbacks.
+        trainer.remove_callback(PrinterCallback)
+        trainer.remove_callback(ProgressCallback)
+        trainer.add_callback(QuietProgressCallback())
         try:
             # Train
             print("Starting training...")
