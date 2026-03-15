@@ -631,7 +631,10 @@ class InfillingMDMCollator:
 
 
 class WandbQualitativeCallback(TrainerCallback):
-    """Periodically log qualitative train/val samples to Weights & Biases."""
+    """Periodically log qualitative train/val samples to Weights & Biases.
+
+    Train split is logged on step intervals; val split is logged on evaluate.
+    """
 
     def __init__(
         self,
@@ -663,7 +666,10 @@ class WandbQualitativeCallback(TrainerCallback):
         self.seed = seed
         self.log_history_table = bool(log_history_table)
         self.log_snapshot_table = bool(log_snapshot_table)
-        self._last_logged_step: Optional[int] = None
+        self._last_logged_step_by_split: Dict[str, Optional[int]] = {
+            "train": None,
+            "val": None,
+        }
 
         self.train_indices = self._sample_indices(train_dataset, seed)
         self.val_indices = (
@@ -801,27 +807,36 @@ class WandbQualitativeCallback(TrainerCallback):
         if payload:
             self.wandb.log(payload, step=step)
 
-    def _maybe_log_qualitative(self, *, model, step: int, epoch: Optional[float]):
-        if self._last_logged_step == step:
+    def _maybe_log_split(
+        self,
+        *,
+        model,
+        split: str,
+        step: int,
+        epoch: Optional[float],
+    ):
+        last_logged_step = self._last_logged_step_by_split.get(split)
+        if last_logged_step == step:
             return
 
-        self._last_logged_step = step
+        self._last_logged_step_by_split[split] = step
+        if split == "train":
+            dataset = self.train_dataset
+            indices = self.train_indices
+        elif split == "val":
+            dataset = self.eval_dataset
+            indices = self.val_indices
+        else:
+            raise ValueError(f"Unknown split for qualitative logging: {split}")
+
         was_training = model.training
         model.eval()
         try:
             self._log_split(
                 model=model,
-                split="train",
-                dataset=self.train_dataset,
-                indices=self.train_indices,
-                step=step,
-                epoch=epoch,
-            )
-            self._log_split(
-                model=model,
-                split="val",
-                dataset=self.eval_dataset,
-                indices=self.val_indices,
+                split=split,
+                dataset=dataset,
+                indices=indices,
                 step=step,
                 epoch=epoch,
             )
@@ -835,20 +850,22 @@ class WandbQualitativeCallback(TrainerCallback):
         if state.global_step % self.log_every_n_steps != 0:
             return
         try:
-            self._maybe_log_qualitative(
+            self._maybe_log_split(
                 model=model,
+                split="train",
                 step=state.global_step,
                 epoch=float(state.epoch) if state.epoch is not None else None,
             )
         except Exception as exc:
-            print(f"[wandb] qualitative logging failed at step {state.global_step}: {exc}")
+            print(f"[wandb] train qualitative logging failed at step {state.global_step}: {exc}")
 
     def on_evaluate(self, args, state, control, model=None, **kwargs):
         if model is None:
             return
         try:
-            self._maybe_log_qualitative(
+            self._maybe_log_split(
                 model=model,
+                split="val",
                 step=state.global_step,
                 epoch=float(state.epoch) if state.epoch is not None else None,
             )
