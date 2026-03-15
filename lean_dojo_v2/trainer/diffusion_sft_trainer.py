@@ -869,7 +869,7 @@ class InfillingDiffusionTrainer:
         val_path: Optional[str] = None,
         output_dir: str = "outputs/infilling-mdm",
         epochs: float = 3.0,
-        batch_size: int = 1,
+        batch_size: int = 8,
         lr: float = 2e-5,
         max_length: int = 1024,
         mask_span_length: int = 64,
