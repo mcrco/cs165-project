@@ -4,10 +4,8 @@ from .grpo_trainer import GRPOTrainer
 from .progress_trainer import ProgressTrainer
 from .retrieval_trainer import RetrievalTrainer
 from .diffusion_sft_trainer import DiffusionSFTTrainer
-from .infilling_sft_trainer import (
-    InfillingAutoregressiveTrainer,
-    InfillingDiffusionTrainer,
-)
+from .infilling_autoregressive_trainer import InfillingAutoregressiveTrainer
+from .infilling_diffusion_trainer import InfillingDiffusionTrainer
 from .sft_trainer import SFTTrainer
 
 __all__ = [

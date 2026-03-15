@@ -17,8 +17,13 @@ from transformers.trainer_callback import PrinterCallback, ProgressCallback
 from .diffusion_sft_trainer import (
     QuietProgressCallback,
     _ensure_prepare_inputs_for_generation,
-    _normalize_optional_text,
 )
+
+
+def _normalize_optional_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
 
 
 def _strip_thinking_segments(text: str) -> str:
