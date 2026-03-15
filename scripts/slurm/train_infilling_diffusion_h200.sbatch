@@ -13,6 +13,7 @@
 set -euo pipefail
 trap 'echo "ERROR at line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
 
+# auto detect project directory
 PROJECT_DIR=""
 for candidate in \
   "${REPO_DIR:-}" \
@@ -35,7 +36,7 @@ mkdir -p "$PROJECT_DIR/logs/slurm"
 cd "$PROJECT_DIR"
 
 export TOKENIZERS_PARALLELISM=false
-export WANDB_PROJECT="${WANDB_PROJECT:-CS165Proj}"
+export WANDB_PROJECT="${WANDB_PROJECT:-infilling}"
 
 echo "=============================================="
 echo "Job ID:        $SLURM_JOB_ID"
