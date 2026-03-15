@@ -651,7 +651,7 @@ class WandbQualitativeCallback(TrainerCallback):
         sampling_remasking: str = DEFAULT_REMASKING,
         seed: int = 0,
         log_history_table: bool = True,
-        log_snapshot_table: bool = True,
+        log_snapshot_table: bool = False,
     ):
         self.wandb = wandb_module
         self.tokenizer = tokenizer
@@ -685,16 +685,17 @@ class WandbQualitativeCallback(TrainerCallback):
             "global_step",
             "epoch",
         ]
-        # Keep persistent tables per split so repeated logs append rows
-        # (same sample_id at different global_step values).
-        self.train_history_table = (
-            self.wandb.Table(columns=self._qual_columns) if self.log_history_table else None
-        )
-        self.val_history_table = (
-            self.wandb.Table(columns=self._qual_columns)
-            if (self.log_history_table and eval_dataset is not None)
-            else None
-        )
+        # Keep history rows in Python and rebuild tables when logging.
+        # This avoids relying on in-place mutation semantics for a previously
+        # logged wandb.Table object.
+        self.train_history_rows: List[Tuple[Any, ...]] = []
+        self.val_history_rows: List[Tuple[Any, ...]] = []
+
+    def _rows_to_table(self, rows: List[Tuple[Any, ...]]):
+        table = self.wandb.Table(columns=self._qual_columns)
+        for record in rows:
+            table.add_data(*record)
+        return table
 
     def _sample_indices(self, dataset: Optional[Dataset], seed: int) -> List[int]:
         if dataset is None:
@@ -762,10 +763,10 @@ class WandbQualitativeCallback(TrainerCallback):
         if dataset is None or not indices:
             return
 
-        history_table = self.train_history_table if split == "train" else self.val_history_table
         if not self.log_history_table and not self.log_snapshot_table:
             return
 
+        history_rows = self.train_history_rows if split == "train" else self.val_history_rows
         snapshot_table = (
             self.wandb.Table(columns=self._qual_columns) if self.log_snapshot_table else None
         )
@@ -794,14 +795,14 @@ class WandbQualitativeCallback(TrainerCallback):
                 step,
                 float(epoch) if epoch is not None else None,
             )
-            if history_table is not None:
-                history_table.add_data(*record)
+            if self.log_history_table:
+                history_rows.append(record)
             if snapshot_table is not None:
                 snapshot_table.add_data(*record)
 
         payload: Dict[str, Any] = {}
-        if history_table is not None:
-            payload[f"{split}_qualitative_samples"] = history_table
+        if self.log_history_table:
+            payload[f"{split}_qualitative_samples"] = self._rows_to_table(history_rows)
         if snapshot_table is not None:
             payload[f"{split}_qualitative_samples_snapshot"] = snapshot_table
         if payload:
