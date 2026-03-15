@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=infilling-diffusion
+#SBATCH --job-name=infilling-autoregressive
 #SBATCH --output=/resnick/groups/tensorlab/myang2/cs165-project/logs/slurm/%x-%j.out
 #SBATCH --error=/resnick/groups/tensorlab/myang2/cs165-project/logs/slurm/%x-%j.err
 #SBATCH --partition=gpu
@@ -21,7 +21,7 @@ for candidate in \
   "/resnick/groups/tensorlab/myang2/cs165-project" \
   "/groups/tensorlab/myang2/cs165-project"
 do
-  if [[ -n "$candidate" && -f "$candidate/scripts/train_infilling_diffusion.py" ]]; then
+  if [[ -n "$candidate" && -f "$candidate/scripts/train_infilling_autoregressive.py" ]]; then
     PROJECT_DIR="$candidate"
     break
   fi
@@ -36,7 +36,7 @@ mkdir -p "$PROJECT_DIR/logs/slurm"
 cd "$PROJECT_DIR"
 
 export TOKENIZERS_PARALLELISM=false
-export WANDB_PROJECT="${WANDB_PROJECT:-infilling}"
+export WANDB_PROJECT="${WANDB_PROJECT:-infilling-ar}"
 
 echo "=============================================="
 echo "Job ID:        $SLURM_JOB_ID"
@@ -48,4 +48,4 @@ echo "=============================================="
 
 nvidia-smi
 
-srun uv run scripts/train_infilling_diffusion.py
+srun uv run scripts/train_infilling_autoregressive.py

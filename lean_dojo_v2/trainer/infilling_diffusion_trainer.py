@@ -510,6 +510,8 @@ class InfillingDiffusionTrainer:
         wandb_run_name: Optional[str] = None,
         qual_log_every_n_steps: int = 200,
         qual_num_samples_per_split: int = 64,
+        max_train_examples: Optional[int] = None,
+        max_val_examples: Optional[int] = None,
         trust_remote_code: bool = True,
     ):
         if not train_path:
@@ -532,6 +534,8 @@ class InfillingDiffusionTrainer:
         self.wandb_run_name = wandb_run_name
         self.qual_log_every_n_steps = qual_log_every_n_steps
         self.qual_num_samples_per_split = qual_num_samples_per_split
+        self.max_train_examples = max_train_examples
+        self.max_val_examples = max_val_examples
         self.wandb_enabled = bool(wandb_project)
         self.trust_remote_code = trust_remote_code
 
@@ -592,7 +596,7 @@ class InfillingDiffusionTrainer:
         model.print_trainable_parameters()
         return model
 
-    def _load_dataset(self, data_path: str) -> Dataset:
+    def _load_dataset(self, data_path: str, max_examples: Optional[int] = None) -> Dataset:
         """Load and process dataset."""
         dataset = InfillingMDMDataset(
             data_path=data_path,
@@ -600,7 +604,12 @@ class InfillingDiffusionTrainer:
             max_length=self.max_length,
             mask_span_length=self.mask_span_length,
         )
-        return dataset.to_hf()
+        hf_dataset = dataset.to_hf()
+        if max_examples is not None:
+            if max_examples <= 0:
+                raise ValueError("max_examples must be positive when provided.")
+            hf_dataset = hf_dataset.select(range(min(max_examples, len(hf_dataset))))
+        return hf_dataset
 
     def _build_infilling_input(
         self,
@@ -728,6 +737,8 @@ class InfillingDiffusionTrainer:
                     "mask_span_length": self.mask_span_length,
                     "qual_log_every_n_steps": self.qual_log_every_n_steps,
                     "qual_num_samples_per_split": self.qual_num_samples_per_split,
+                    "max_train_examples": self.max_train_examples,
+                    "max_val_examples": self.max_val_examples,
                     "use_lora": self.use_lora,
                 },
             )
@@ -735,13 +746,13 @@ class InfillingDiffusionTrainer:
 
         # Load datasets
         print(f"Loading training data from {self.train_path}")
-        train_dataset = self._load_dataset(self.train_path)
+        train_dataset = self._load_dataset(self.train_path, self.max_train_examples)
         print(f"Loaded {len(train_dataset)} training examples")
 
         eval_dataset = None
         if self.val_path:
             print(f"Loading validation data from {self.val_path}")
-            eval_dataset = self._load_dataset(self.val_path)
+            eval_dataset = self._load_dataset(self.val_path, self.max_val_examples)
             print(f"Loaded {len(eval_dataset)} validation examples")
 
         # Create collator

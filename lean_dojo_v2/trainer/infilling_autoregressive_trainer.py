@@ -26,27 +26,10 @@ def _normalize_optional_text(value: Any) -> str:
     return str(value).strip()
 
 
-def _strip_thinking_segments(text: str) -> str:
-    """Best-effort removal of explicit thinking tags from model outputs."""
-    out = str(text)
-    while True:
-        start = out.find("<think>")
-        if start == -1:
-            break
-        end = out.find("</think>", start + len("<think>"))
-        if end == -1:
-            out = out[:start]
-            break
-        out = out[:start] + out[end + len("</think>") :]
-    return out.strip()
-
-
 def _build_ar_infilling_prompt_prefix(
     tokenizer,
     theorem_statement: str,
     proof_with_hole: str,
-    *,
-    non_thinking_mode: bool = True,
 ) -> str:
     """Build chat prompt for autoregressive infilling of a single tactic."""
     system_chunks = [
@@ -58,10 +41,9 @@ def _build_ar_infilling_prompt_prefix(
         "- Single line only when possible.",
         "- Never use `sorry` or `admit`.",
     ]
-    if non_thinking_mode:
-        system_chunks.append(
-            "- Do not include reasoning, scratch work, or <think>...</think> content."
-        )
+    system_chunks.append(
+        "- Do not include reasoning, scratch work, or <think>...</think> content."
+    )
     system_prompt = "\n".join(system_chunks)
 
     user_chunks = [
@@ -93,13 +75,11 @@ class InfillingARDataset:
         *,
         max_length: int = 1024,
         hole_token: str = "<HOLE>",
-        non_thinking_mode: bool = True,
     ):
         self.data_path = data_path
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.hole_token = hole_token
-        self.non_thinking_mode = non_thinking_mode
 
         with open(data_path, encoding="utf-8") as f:
             self.json_data = json.load(f)
@@ -127,7 +107,6 @@ class InfillingARDataset:
                 self.tokenizer,
                 theorem_statement,
                 proof_with_hole,
-                non_thinking_mode=self.non_thinking_mode,
             )
             prompt_ids = self.tokenizer(
                 prompt_prefix,
@@ -207,7 +186,7 @@ class InfillingAutoregressiveTrainer:
 
     def __init__(
         self,
-        model_name: str = "Qwen/Qwen3-7B",
+        model_name: str = "Qwen/Qwen2.5-7B",
         train_path: str = "",
         val_path: Optional[str] = None,
         output_dir: str = "outputs/infilling-ar",
@@ -216,13 +195,14 @@ class InfillingAutoregressiveTrainer:
         lr: float = 2e-5,
         max_length: int = 1024,
         max_new_tokens: int = 128,
-        non_thinking_mode: bool = True,
         lora_config: Optional[LoraConfig] = None,
         bf16: Optional[bool] = None,
         logging_steps: int = 10,
         save_strategy: str = "epoch",
         wandb_project: Optional[str] = "infilling-ar",
         wandb_run_name: Optional[str] = None,
+        max_train_examples: Optional[int] = None,
+        max_val_examples: Optional[int] = None,
         trust_remote_code: bool = True,
     ):
         if not train_path:
@@ -237,13 +217,14 @@ class InfillingAutoregressiveTrainer:
         self.lr = lr
         self.max_length = max_length
         self.max_new_tokens = max_new_tokens
-        self.non_thinking_mode = non_thinking_mode
         self.lora_config = lora_config
         self.use_lora = lora_config is not None
         self.logging_steps = logging_steps
         self.save_strategy = save_strategy
         self.wandb_project = wandb_project
         self.wandb_run_name = wandb_run_name
+        self.max_train_examples = max_train_examples
+        self.max_val_examples = max_val_examples
         self.wandb_enabled = bool(wandb_project)
         self.trust_remote_code = trust_remote_code
 
@@ -292,14 +273,18 @@ class InfillingAutoregressiveTrainer:
         model.print_trainable_parameters()
         return model
 
-    def _load_dataset(self, data_path: str) -> Dataset:
+    def _load_dataset(self, data_path: str, max_examples: Optional[int] = None) -> Dataset:
         dataset = InfillingARDataset(
             data_path=data_path,
             tokenizer=self.tokenizer,
             max_length=self.max_length,
-            non_thinking_mode=self.non_thinking_mode,
         )
-        return dataset.to_hf()
+        hf_dataset = dataset.to_hf()
+        if max_examples is not None:
+            if max_examples <= 0:
+                raise ValueError("max_examples must be positive when provided.")
+            hf_dataset = hf_dataset.select(range(min(max_examples, len(hf_dataset))))
+        return hf_dataset
 
     def sample_infilling_tactic(
         self,
@@ -318,7 +303,6 @@ class InfillingAutoregressiveTrainer:
             self.tokenizer,
             theorem_statement=theorem_statement,
             proof_with_hole=proof_with_hole,
-            non_thinking_mode=self.non_thinking_mode,
         )
         encoded = self.tokenizer(prompt_prefix, return_tensors="pt")
         input_ids = encoded.input_ids.to(self.model.device)
@@ -345,7 +329,6 @@ class InfillingAutoregressiveTrainer:
             decoded = self.tokenizer.decode(
                 completion_ids, skip_special_tokens=True
             ).strip()
-            decoded = _strip_thinking_segments(decoded)
             if decoded:
                 decoded = decoded.splitlines()[0].strip()
             results.append(decoded)
@@ -375,20 +358,21 @@ class InfillingAutoregressiveTrainer:
                     "learning_rate": self.lr,
                     "max_length": self.max_length,
                     "max_new_tokens": self.max_new_tokens,
-                    "non_thinking_mode": self.non_thinking_mode,
+                    "max_train_examples": self.max_train_examples,
+                    "max_val_examples": self.max_val_examples,
                     "use_lora": self.use_lora,
                 },
             )
             wandb_module = wandb
 
         print(f"Loading training data from {self.train_path}")
-        train_dataset = self._load_dataset(self.train_path)
+        train_dataset = self._load_dataset(self.train_path, self.max_train_examples)
         print(f"Loaded {len(train_dataset)} training examples")
 
         eval_dataset = None
         if self.val_path:
             print(f"Loading validation data from {self.val_path}")
-            eval_dataset = self._load_dataset(self.val_path)
+            eval_dataset = self._load_dataset(self.val_path, self.max_val_examples)
             print(f"Loaded {len(eval_dataset)} validation examples")
 
         data_collator = InfillingARCollator(
