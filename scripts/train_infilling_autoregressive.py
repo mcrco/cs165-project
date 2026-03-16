@@ -28,6 +28,11 @@ def _optional_positive_int(value: str) -> Optional[int]:
     return parsed
 
 
+def _safe_dir_component(value: str) -> str:
+    normalized = value.strip().replace("/", "-").replace("\\", "-").replace(" ", "-")
+    return normalized or "run"
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Train an autoregressive infilling model on Lean proof holes.",
@@ -45,8 +50,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--output-dir",
-        default="outputs/infilling-ar-qwen2.5-7b-april",
-        help="Directory to save checkpoints and final model.",
+        default=None,
+        help="Directory to save checkpoints and final model (default: outputs/<wandb-run-name>).",
     )
     parser.add_argument("--epochs", type=float, default=20.0)
     parser.add_argument("--batch-size", type=int, default=8)
@@ -109,6 +114,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = _build_parser().parse_args()
+    output_dir = args.output_dir or str(Path("outputs") / _safe_dir_component(args.wandb_run_name))
 
     train_path = Path(args.train_path)
     val_path = Path(args.val_path)
@@ -129,7 +135,7 @@ def main() -> None:
         model_name=args.model_name,
         train_path=str(train_path),
         val_path=resolved_val_path,
-        output_dir=args.output_dir,
+        output_dir=output_dir,
         epochs=args.epochs,
         batch_size=args.batch_size,
         lr=args.lr,
@@ -150,7 +156,7 @@ def main() -> None:
     trainer.training_args.disable_tqdm = False
     trainer.train()
 
-    print(f"\nModel saved to {args.output_dir}")
+    print(f"\nModel saved to {output_dir}")
     print("You can now use this model for autoregressive infilling inference.")
 
 
