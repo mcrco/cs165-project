@@ -398,6 +398,35 @@ class WandbQualitativeCallback(TrainerCallback):
     def _decode_predicted_tactic(self, token_ids: List[int]) -> str:
         return decode_until_stop(self.tokenizer, token_ids, self.mask_token_id)
 
+    def _format_display_prompt(self, row: Dict[str, Any]) -> str:
+        input_ids = row.get("input_ids")
+        if isinstance(input_ids, list) and input_ids:
+            display_ids = list(input_ids)
+            if "mask_start" in row and "mask_end" in row:
+                mask_start = max(0, int(row["mask_start"]))
+                mask_end = min(int(row["mask_end"]), len(display_ids))
+                for pos in range(mask_start, max(mask_start, mask_end)):
+                    display_ids[pos] = self.mask_token_id
+            elif "assistant_start" in row:
+                assistant_start = max(0, int(row["assistant_start"]))
+                for pos in range(assistant_start, len(display_ids)):
+                    display_ids[pos] = self.mask_token_id
+            return self.tokenizer.decode(
+                display_ids,
+                skip_special_tokens=False,
+                clean_up_tokenization_spaces=False,
+            )
+
+        prompt = row.get("prompt_user", "")
+        proof_with_hole = row.get("proof_with_hole", "")
+        if proof_with_hole:
+            prompt = (
+                f"{prompt}\n\nAssistant proof template:\n{proof_with_hole}"
+                if prompt
+                else proof_with_hole
+            )
+        return prompt
+
     def _predict_tactic(self, model, row: Dict[str, Any]) -> str:
         device = next(model.parameters()).device
         input_ids = torch.tensor(row["input_ids"], dtype=torch.long, device=device).unsqueeze(0)
@@ -535,14 +564,7 @@ class WandbQualitativeCallback(TrainerCallback):
             if theorem_statement:
                 theorem = f"{theorem}: {theorem_statement}" if theorem else theorem_statement
 
-            prompt = row.get("prompt_user", "")
-            proof_with_hole = row.get("proof_with_hole", "")
-            if proof_with_hole:
-                prompt = (
-                    f"{prompt}\n\nAssistant proof template:\n{proof_with_hole}"
-                    if prompt
-                    else proof_with_hole
-                )
+            prompt = self._format_display_prompt(row)
             expected_tactic = row.get("target_tactic", "")
             predicted_tactic = self._predict_tactic(model, row)
             expected_norm = _normalize_tactic_for_exact_match(expected_tactic)
@@ -951,13 +973,7 @@ class InfillingDiffusionTrainer:
         """Run training."""
         wandb_module = None
         if self.wandb_enabled:
-            try:
-                import wandb  # type: ignore
-            except ImportError as exc:
-                raise ImportError(
-                    "wandb logging is enabled but wandb is not installed. "
-                    "Install it with `pip install wandb`."
-                ) from exc
+            import wandb
 
             wandb.init(
                 project=self.wandb_project,
