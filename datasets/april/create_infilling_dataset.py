@@ -19,6 +19,7 @@ import random
 import re
 import signal
 import subprocess
+import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -36,7 +37,7 @@ DEFAULT_PROJECT_PATH = APRIL_DIR / "april_eval_project"
 # APRIL has pre-split train/val manifests in materialized/{train,val}/
 DEFAULT_TRAIN_MANIFEST_PATH = APRIL_DIR / "materialized" / "train" / "thme_train.manifest.jsonl"
 DEFAULT_VAL_MANIFEST_PATH = APRIL_DIR / "materialized" / "val" / "thme_val.manifest.jsonl"
-DEFAULT_OUTPUT_JSON = APRIL_DIR / "leandojo_infilling" / "train.jsonl"
+DEFAULT_OUTPUT_JSON = APRIL_DIR / "leandojo_infilling" / "thme.jsonl"
 HOLE_TOKEN = "<HOLE>"
 
 
@@ -750,6 +751,15 @@ def main() -> None:
         help="Number of concurrent worker threads (default: 1)",
     )
     parser.add_argument(
+        "--max-in-flight",
+        type=int,
+        default=None,
+        help=(
+            "Maximum queued futures when --jobs > 1 (default: 4x jobs). "
+            "Lower this to reduce memory pressure."
+        ),
+    )
+    parser.add_argument(
         "--failure-log",
         type=Path,
         default=None,
@@ -815,6 +825,7 @@ def main() -> None:
         reasons: Counter[str] = Counter()
         theorems_ok = 0
         num_examples = 0
+        start_time = time.perf_counter()
 
         progress = tqdm(
             total=len(manifest),
@@ -850,15 +861,29 @@ def main() -> None:
                 )
                 progress.update(1)
                 if progress.n % 25 == 0:
+                    elapsed = max(time.perf_counter() - start_time, 1e-9)
                     progress.set_postfix(
                         theorems_ok=theorems_ok,
                         total_examples=num_examples,
+                        examples_per_s=f"{(num_examples / elapsed):.1f}",
                         failed=len(failures),
                     )
         else:
+            max_in_flight = args.max_in_flight
+            if max_in_flight is None:
+                max_in_flight = max(args.jobs * 4, args.jobs)
+            max_in_flight = max(max_in_flight, args.jobs)
+
             with ThreadPoolExecutor(max_workers=args.jobs) as executor:
-                futures = [
-                    executor.submit(
+                manifest_iter = iter(manifest)
+                in_flight: set[Any] = set()
+
+                def submit_next() -> bool:
+                    try:
+                        entry = next(manifest_iter)
+                    except StopIteration:
+                        return False
+                    future = executor.submit(
                         process_file,
                         entry,
                         args.project_path,
@@ -866,17 +891,28 @@ def main() -> None:
                         args.hole_token,
                         args.parser,
                     )
-                    for entry in manifest
-                ]
-                for future in as_completed(futures):
+                    in_flight.add(future)
+                    return True
+
+                while len(in_flight) < max_in_flight and submit_next():
+                    pass
+
+                while in_flight:
+                    future = next(as_completed(in_flight))
+                    in_flight.remove(future)
+
                     ingest_result(future.result())
                     progress.update(1)
                     if progress.n % 25 == 0:
+                        elapsed = max(time.perf_counter() - start_time, 1e-9)
                         progress.set_postfix(
                             theorems_ok=theorems_ok,
                             total_examples=num_examples,
+                            examples_per_s=f"{(num_examples / elapsed):.1f}",
                             failed=len(failures),
                         )
+
+                    submit_next()
 
         progress.close()
         return num_examples, failures, reasons
