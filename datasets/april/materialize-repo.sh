@@ -49,6 +49,9 @@ fi
 for input in "${inputs[@]}"; do
   rel="${input#raw/}"
   stem="${rel%.jsonl}"
+  stem_path="${stem//\//.}"
+  sanitized_stem="$(echo "${stem_path}" | sed -E 's/[^A-Za-z0-9_.]/_/g')"
+  module_prefix="AprilEval.Materialized.${sanitized_stem}"
 
   manifest="${SCRIPT_DIR}/materialized/${stem}.manifest.jsonl"
   failure_log="${SCRIPT_DIR}/failures/${stem}.failures.jsonl"
@@ -57,7 +60,7 @@ for input in "${inputs[@]}"; do
 
   echo "[materialize-repo] ${input} -> ${manifest}"
 
-  materialize_base_cmd="uv run python materialize_april_repo.py --project-path ${WORK_REPO} --module-prefix AprilEval.Materialized"
+  materialize_base_cmd="uv run python materialize_april_repo.py --project-path ${WORK_REPO} --module-prefix AprilEval.Materialized.<stem>"
   if [[ -n "${MAX_EXAMPLES:-}" ]]; then
     materialize_base_cmd="${materialize_base_cmd} --max-examples ${MAX_EXAMPLES}"
   fi
@@ -67,7 +70,7 @@ for input in "${inputs[@]}"; do
     --input-jsonl "${input}"
     --project-path "${WORK_REPO}"
     --manifest-path "${manifest}"
-    --module-prefix "AprilEval.Materialized"
+    --module-prefix "${module_prefix}"
   )
   if [[ -n "${MAX_EXAMPLES:-}" ]]; then
     materialize_cmd+=(--max-examples "${MAX_EXAMPLES}")
