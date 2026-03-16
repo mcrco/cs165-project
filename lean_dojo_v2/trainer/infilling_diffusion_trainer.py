@@ -334,6 +334,7 @@ class WandbQualitativeCallback(TrainerCallback):
         sampling_steps: int = DEFAULT_DIFFUSION_STEPS,
         sampling_temperature: float = DEFAULT_DIFFUSION_TEMPERATURE,
         sampling_remasking: str = DEFAULT_REMASKING,
+        full_eval_batch_size: int = 8,
         seed: int = 0,
         log_history_table: bool = True,
         log_snapshot_table: bool = False,
@@ -348,6 +349,7 @@ class WandbQualitativeCallback(TrainerCallback):
         self.sampling_steps = max(1, int(sampling_steps))
         self.sampling_temperature = float(sampling_temperature)
         self.sampling_remasking = sampling_remasking
+        self.full_eval_batch_size = max(1, int(full_eval_batch_size))
         self.seed = seed
         self.log_history_table = bool(log_history_table)
         self.log_snapshot_table = bool(log_snapshot_table)
@@ -434,6 +436,77 @@ class WandbQualitativeCallback(TrainerCallback):
         predicted_ids = sampled[0].tolist()
         predicted_span = [predicted_ids[pos] for pos in supervised_positions]
         return self._decode_predicted_tactic(predicted_span)
+
+    def _predict_tactics_batch(self, model, rows: List[Dict[str, Any]]) -> List[str]:
+        if not rows:
+            return []
+
+        device = next(model.parameters()).device
+        pad_token_id = self.tokenizer.pad_token_id
+        if pad_token_id is None:
+            pad_token_id = self.tokenizer.eos_token_id
+        if pad_token_id is None:
+            pad_token_id = 0
+
+        predictions: List[str] = [""] * len(rows)
+        batch_entries: List[Tuple[int, List[int], List[int]]] = []
+        for row_idx, row in enumerate(rows):
+            input_ids = list(row["input_ids"])
+            if "mask_start" in row and "mask_end" in row:
+                mask_start = int(row["mask_start"])
+                mask_end = int(row["mask_end"])
+                supervised_positions = list(range(mask_start, min(mask_end, len(input_ids))))
+            elif "assistant_start" in row:
+                assistant_start = int(row["assistant_start"])
+                supervised_positions = list(range(assistant_start, len(input_ids)))
+            else:
+                raise ValueError(
+                    "Expected infilling-chat ('mask_start'/'mask_end') or next-tactic "
+                    "('assistant_start') schema for qualitative sampling."
+                )
+            if supervised_positions:
+                batch_entries.append((row_idx, input_ids, supervised_positions))
+
+        if not batch_entries:
+            return predictions
+
+        max_len = max(len(entry[1]) for entry in batch_entries)
+        batch_size = len(batch_entries)
+        input_tensor = torch.full(
+            (batch_size, max_len),
+            pad_token_id,
+            dtype=torch.long,
+            device=device,
+        )
+        attention_mask = torch.zeros((batch_size, max_len), dtype=torch.long, device=device)
+
+        for batch_idx, (_row_idx, ids, _positions) in enumerate(batch_entries):
+            seq_len = len(ids)
+            input_tensor[batch_idx, :seq_len] = torch.tensor(ids, dtype=torch.long, device=device)
+            attention_mask[batch_idx, :seq_len] = 1
+
+        masked_input = input_tensor.clone()
+        for batch_idx, (_row_idx, _ids, positions) in enumerate(batch_entries):
+            for pos in positions:
+                masked_input[batch_idx, pos] = self.mask_token_id
+
+        with torch.inference_mode():
+            sampled = denoise_masked_sequence(
+                model=model,
+                input_ids=masked_input,
+                attention_mask=attention_mask,
+                mask_token_id=self.mask_token_id,
+                steps=self.sampling_steps,
+                temperature=self.sampling_temperature,
+                remasking=self.sampling_remasking,
+            )
+
+        for batch_idx, (row_idx, _ids, positions) in enumerate(batch_entries):
+            predicted_ids = sampled[batch_idx].tolist()
+            predicted_span = [predicted_ids[pos] for pos in positions]
+            predictions[row_idx] = self._decode_predicted_tactic(predicted_span)
+
+        return predictions
 
     def _log_split(
         self,
@@ -525,15 +598,23 @@ class WandbQualitativeCallback(TrainerCallback):
 
         num_examples = 0
         num_exact_matches = 0
-        for idx in range(len(self.eval_dataset)):
-            row = self.eval_dataset[idx]
-            expected_tactic = row.get("target_tactic", "")
-            predicted_tactic = self._predict_tactic(model, row)
-            expected_norm = _normalize_tactic_for_exact_match(expected_tactic)
-            predicted_norm = _normalize_tactic_for_exact_match(predicted_tactic)
-            num_examples += 1
-            if expected_norm and expected_norm == predicted_norm:
-                num_exact_matches += 1
+        num_rows = len(self.eval_dataset)
+        for start in tqdm(
+            range(0, num_rows, self.full_eval_batch_size),
+            desc="Full val exact-match eval",
+            unit="batch",
+            leave=False,
+        ):
+            end = min(start + self.full_eval_batch_size, num_rows)
+            rows = [self.eval_dataset[idx] for idx in range(start, end)]
+            predicted_tactics = self._predict_tactics_batch(model, rows)
+            for row, predicted_tactic in zip(rows, predicted_tactics):
+                expected_tactic = row.get("target_tactic", "")
+                expected_norm = _normalize_tactic_for_exact_match(expected_tactic)
+                predicted_norm = _normalize_tactic_for_exact_match(predicted_tactic)
+                num_examples += 1
+                if expected_norm and expected_norm == predicted_norm:
+                    num_exact_matches += 1
 
         exact_match_accuracy = (
             float(num_exact_matches) / float(num_examples) if num_examples > 0 else 0.0
@@ -933,6 +1014,7 @@ class InfillingDiffusionTrainer:
                     eval_dataset=eval_dataset,
                     num_samples_per_split=self.qual_num_samples_per_split,
                     sampling_steps=self.qual_sampling_steps,
+                    full_eval_batch_size=max(1, int(self.batch_size) * 2),
                 )
             )
 

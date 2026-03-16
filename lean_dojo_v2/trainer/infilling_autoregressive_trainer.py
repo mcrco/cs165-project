@@ -256,6 +256,7 @@ class WandbQualitativeCallback(TrainerCallback):
         num_samples_per_split: int,
         temperature: float = 0.7,
         top_p: float = 0.9,
+        full_eval_batch_size: int = 8,
         seed: int = 0,
         log_history_table: bool = True,
         log_snapshot_table: bool = False,
@@ -268,6 +269,7 @@ class WandbQualitativeCallback(TrainerCallback):
         self.num_samples_per_split = max(1, int(num_samples_per_split))
         self.temperature = float(temperature)
         self.top_p = float(top_p)
+        self.full_eval_batch_size = max(1, int(full_eval_batch_size))
         self.seed = seed
         self.log_history_table = bool(log_history_table)
         self.log_snapshot_table = bool(log_snapshot_table)
@@ -347,6 +349,59 @@ class WandbQualitativeCallback(TrainerCallback):
         if decoded:
             decoded = decoded.splitlines()[0].strip()
         return decoded
+
+    def _predict_tactics_batch(self, model, rows: List[Dict[str, Any]]) -> List[str]:
+        if not rows:
+            return []
+
+        prompts: List[str] = []
+        for row in rows:
+            theorem_statement = _normalize_optional_text(row.get("theorem_statement", ""))
+            proof_with_hole = _normalize_optional_text(row.get("proof_with_hole", ""))
+            if not proof_with_hole:
+                prompts.append("")
+                continue
+            prompts.append(
+                _build_ar_infilling_prompt_prefix(
+                    self.tokenizer,
+                    theorem_statement=theorem_statement,
+                    proof_with_hole=proof_with_hole,
+                )
+            )
+
+        valid_indices = [i for i, prompt in enumerate(prompts) if prompt]
+        predictions: List[str] = [""] * len(rows)
+        if not valid_indices:
+            return predictions
+
+        valid_prompts = [prompts[i] for i in valid_indices]
+        encoded = self.tokenizer(valid_prompts, return_tensors="pt", padding=True)
+        input_ids = encoded.input_ids.to(model.device)
+        attention_mask = encoded.attention_mask.to(model.device)
+
+        do_sample = self.temperature > 0.0
+        with torch.no_grad():
+            generated = model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=self.max_new_tokens,
+                do_sample=do_sample,
+                temperature=self.temperature if do_sample else None,
+                top_p=self.top_p if do_sample else None,
+                num_return_sequences=1,
+                pad_token_id=self.tokenizer.pad_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
+            )
+
+        for batch_idx, original_idx in enumerate(valid_indices):
+            prompt_len = int(attention_mask[batch_idx].sum().item())
+            completion_ids = generated[batch_idx].tolist()[prompt_len:]
+            decoded = self.tokenizer.decode(completion_ids, skip_special_tokens=True).strip()
+            if decoded:
+                decoded = decoded.splitlines()[0].strip()
+            predictions[original_idx] = decoded
+
+        return predictions
 
     def _log_split(
         self,
@@ -431,15 +486,23 @@ class WandbQualitativeCallback(TrainerCallback):
 
         num_examples = 0
         num_exact_matches = 0
-        for idx in range(len(self.eval_dataset)):
-            row = self.eval_dataset[idx]
-            expected_tactic = row.get("target_tactic", "")
-            predicted_tactic = self._predict_tactic(model, row)
-            expected_norm = _normalize_tactic_for_exact_match(expected_tactic)
-            predicted_norm = _normalize_tactic_for_exact_match(predicted_tactic)
-            num_examples += 1
-            if expected_norm and expected_norm == predicted_norm:
-                num_exact_matches += 1
+        num_rows = len(self.eval_dataset)
+        for start in tqdm(
+            range(0, num_rows, self.full_eval_batch_size),
+            desc="Full val exact-match eval",
+            unit="batch",
+            leave=False,
+        ):
+            end = min(start + self.full_eval_batch_size, num_rows)
+            rows = [self.eval_dataset[idx] for idx in range(start, end)]
+            predicted_tactics = self._predict_tactics_batch(model, rows)
+            for row, predicted_tactic in zip(rows, predicted_tactics):
+                expected_tactic = row.get("target_tactic", "")
+                expected_norm = _normalize_tactic_for_exact_match(expected_tactic)
+                predicted_norm = _normalize_tactic_for_exact_match(predicted_tactic)
+                num_examples += 1
+                if expected_norm and expected_norm == predicted_norm:
+                    num_exact_matches += 1
 
         exact_match_accuracy = (
             float(num_exact_matches) / float(num_examples) if num_examples > 0 else 0.0
@@ -763,6 +826,7 @@ class InfillingAutoregressiveTrainer:
                     num_samples_per_split=self.qual_num_samples_per_split,
                     temperature=self.qual_sampling_temperature,
                     top_p=self.qual_sampling_top_p,
+                    full_eval_batch_size=max(1, int(self.batch_size) * 2),
                 )
             )
 
