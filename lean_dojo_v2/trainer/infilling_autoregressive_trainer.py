@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional
+import random
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from datasets import Dataset
@@ -10,6 +12,7 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     Trainer,
+    TrainerCallback,
     TrainingArguments,
 )
 from transformers.trainer_callback import PrinterCallback, ProgressCallback
@@ -24,6 +27,14 @@ def _normalize_optional_text(value: Any) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+def _normalize_tactic_for_exact_match(value: Any) -> str:
+    """Normalize tactic text for strict-but-whitespace-insensitive matching."""
+    if value is None:
+        return ""
+    text = str(value).strip()
+    return re.sub(r"\s+", "", text)
 
 
 def _build_ar_infilling_prompt_prefix(
@@ -181,6 +192,244 @@ class InfillingARCollator:
         }
 
 
+class WandbQualitativeCallback(TrainerCallback):
+    """Periodically log qualitative train/val samples to Weights & Biases."""
+
+    def __init__(
+        self,
+        *,
+        wandb_module,
+        tokenizer,
+        max_new_tokens: int,
+        train_dataset: Dataset,
+        eval_dataset: Optional[Dataset],
+        log_every_n_steps: int,
+        num_samples_per_split: int,
+        temperature: float = 0.7,
+        top_p: float = 0.9,
+        seed: int = 0,
+        log_history_table: bool = True,
+        log_snapshot_table: bool = False,
+    ):
+        self.wandb = wandb_module
+        self.tokenizer = tokenizer
+        self.max_new_tokens = max(1, int(max_new_tokens))
+        self.train_dataset = train_dataset
+        self.eval_dataset = eval_dataset
+        self.log_every_n_steps = max(1, int(log_every_n_steps))
+        self.num_samples_per_split = max(1, int(num_samples_per_split))
+        self.temperature = float(temperature)
+        self.top_p = float(top_p)
+        self.seed = seed
+        self.log_history_table = bool(log_history_table)
+        self.log_snapshot_table = bool(log_snapshot_table)
+        self._last_logged_step_by_split: Dict[str, Optional[int]] = {
+            "train": None,
+            "val": None,
+        }
+
+        self.train_indices = self._sample_indices(train_dataset, seed)
+        self.val_indices = (
+            self._sample_indices(eval_dataset, seed + 1) if eval_dataset is not None else []
+        )
+        self._qual_columns = [
+            "split",
+            "sample_id",
+            "theorem",
+            "prompt",
+            "expected_tactic",
+            "predicted_tactic",
+            "global_step",
+            "epoch",
+        ]
+        self.train_history_rows: List[Tuple[Any, ...]] = []
+        self.val_history_rows: List[Tuple[Any, ...]] = []
+
+    def _rows_to_table(self, rows: List[Tuple[Any, ...]]):
+        table = self.wandb.Table(columns=self._qual_columns)
+        for record in rows:
+            table.add_data(*record)
+        return table
+
+    def _sample_indices(self, dataset: Optional[Dataset], seed: int) -> List[int]:
+        if dataset is None:
+            return []
+        n = len(dataset)
+        if n == 0:
+            return []
+        k = min(self.num_samples_per_split, n)
+        if k == n:
+            return list(range(n))
+        rng = random.Random(seed)
+        return sorted(rng.sample(range(n), k))
+
+    def _predict_tactic(self, model, row: Dict[str, Any]) -> str:
+        theorem_statement = _normalize_optional_text(row.get("theorem_statement", ""))
+        proof_with_hole = _normalize_optional_text(row.get("proof_with_hole", ""))
+        if not proof_with_hole:
+            return ""
+
+        prompt_prefix = _build_ar_infilling_prompt_prefix(
+            self.tokenizer,
+            theorem_statement=theorem_statement,
+            proof_with_hole=proof_with_hole,
+        )
+        encoded = self.tokenizer(prompt_prefix, return_tensors="pt")
+        input_ids = encoded.input_ids.to(model.device)
+        attention_mask = encoded.attention_mask.to(model.device)
+
+        do_sample = self.temperature > 0.0
+        with torch.no_grad():
+            generated = model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=self.max_new_tokens,
+                do_sample=do_sample,
+                temperature=self.temperature if do_sample else None,
+                top_p=self.top_p if do_sample else None,
+                num_return_sequences=1,
+                pad_token_id=self.tokenizer.pad_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
+            )
+
+        prompt_len = input_ids.shape[1]
+        completion_ids = generated[0].tolist()[prompt_len:]
+        decoded = self.tokenizer.decode(completion_ids, skip_special_tokens=True).strip()
+        if decoded:
+            decoded = decoded.splitlines()[0].strip()
+        return decoded
+
+    def _log_split(
+        self,
+        *,
+        model,
+        split: str,
+        dataset: Optional[Dataset],
+        indices: List[int],
+        step: int,
+        epoch: Optional[float],
+    ):
+        if dataset is None or not indices:
+            return
+
+        history_rows = self.train_history_rows if split == "train" else self.val_history_rows
+        snapshot_table = (
+            self.wandb.Table(columns=self._qual_columns) if self.log_snapshot_table else None
+        )
+        num_examples = 0
+        num_exact_matches = 0
+        for idx in indices:
+            row = dataset[idx]
+            full_name = row.get("full_name", "")
+            theorem_statement = row.get("theorem_statement", "")
+            theorem = full_name.strip()
+            if theorem_statement:
+                theorem = f"{theorem}: {theorem_statement}" if theorem else theorem_statement
+
+            prompt = row.get("proof_with_hole", "")
+            expected_tactic = row.get("target_tactic", "")
+            predicted_tactic = self._predict_tactic(model, row)
+            expected_norm = _normalize_tactic_for_exact_match(expected_tactic)
+            predicted_norm = _normalize_tactic_for_exact_match(predicted_tactic)
+            num_examples += 1
+            if expected_norm and expected_norm == predicted_norm:
+                num_exact_matches += 1
+
+            record = (
+                split,
+                int(idx),
+                theorem,
+                prompt,
+                expected_tactic,
+                predicted_tactic,
+                step,
+                float(epoch) if epoch is not None else None,
+            )
+            if self.log_history_table:
+                history_rows.append(record)
+            if snapshot_table is not None:
+                snapshot_table.add_data(*record)
+
+        payload: Dict[str, Any] = {}
+        exact_match_accuracy = (
+            float(num_exact_matches) / float(num_examples) if num_examples > 0 else 0.0
+        )
+        payload[f"{split}_qualitative_exact_match_accuracy"] = exact_match_accuracy
+        payload[f"{split}_qualitative_num_samples"] = num_examples
+        payload[f"{split}_qualitative_num_exact_matches"] = num_exact_matches
+        if self.log_history_table:
+            payload[f"{split}_qualitative_samples"] = self._rows_to_table(history_rows)
+        if snapshot_table is not None:
+            payload[f"{split}_qualitative_samples_snapshot"] = snapshot_table
+        if payload:
+            self.wandb.log(payload, step=step)
+
+    def _maybe_log_split(
+        self,
+        *,
+        model,
+        split: str,
+        step: int,
+        epoch: Optional[float],
+    ):
+        last_logged_step = self._last_logged_step_by_split.get(split)
+        if last_logged_step == step:
+            return
+
+        self._last_logged_step_by_split[split] = step
+        if split == "train":
+            dataset = self.train_dataset
+            indices = self.train_indices
+        elif split == "val":
+            dataset = self.eval_dataset
+            indices = self.val_indices
+        else:
+            raise ValueError(f"Unknown split for qualitative logging: {split}")
+
+        was_training = model.training
+        model.eval()
+        try:
+            self._log_split(
+                model=model,
+                split=split,
+                dataset=dataset,
+                indices=indices,
+                step=step,
+                epoch=epoch,
+            )
+        finally:
+            if was_training:
+                model.train()
+
+    def on_step_end(self, args, state, control, model=None, **kwargs):
+        if model is None or state.global_step <= 0:
+            return
+        if state.global_step % self.log_every_n_steps != 0:
+            return
+        try:
+            self._maybe_log_split(
+                model=model,
+                split="train",
+                step=state.global_step,
+                epoch=float(state.epoch) if state.epoch is not None else None,
+            )
+        except Exception as exc:
+            print(f"[wandb] train qualitative logging failed at step {state.global_step}: {exc}")
+
+    def on_evaluate(self, args, state, control, model=None, **kwargs):
+        if model is None:
+            return
+        try:
+            self._maybe_log_split(
+                model=model,
+                split="val",
+                step=state.global_step,
+                epoch=float(state.epoch) if state.epoch is not None else None,
+            )
+        except Exception as exc:
+            print(f"[wandb] qualitative eval logging failed at step {state.global_step}: {exc}")
+
+
 class InfillingAutoregressiveTrainer:
     """Trainer for autoregressive infilling on Lean proof holes."""
 
@@ -201,6 +450,10 @@ class InfillingAutoregressiveTrainer:
         save_strategy: str = "epoch",
         wandb_project: Optional[str] = "infilling-ar",
         wandb_run_name: Optional[str] = None,
+        qual_log_every_n_steps: int = 200,
+        qual_num_samples_per_split: int = 64,
+        qual_sampling_temperature: float = 0.0,
+        qual_sampling_top_p: float = 0.9,
         max_train_examples: Optional[int] = None,
         max_val_examples: Optional[int] = None,
         trust_remote_code: bool = True,
@@ -223,6 +476,10 @@ class InfillingAutoregressiveTrainer:
         self.save_strategy = save_strategy
         self.wandb_project = wandb_project
         self.wandb_run_name = wandb_run_name
+        self.qual_log_every_n_steps = qual_log_every_n_steps
+        self.qual_num_samples_per_split = qual_num_samples_per_split
+        self.qual_sampling_temperature = qual_sampling_temperature
+        self.qual_sampling_top_p = qual_sampling_top_p
         self.max_train_examples = max_train_examples
         self.max_val_examples = max_val_examples
         self.wandb_enabled = bool(wandb_project)
@@ -358,6 +615,10 @@ class InfillingAutoregressiveTrainer:
                     "learning_rate": self.lr,
                     "max_length": self.max_length,
                     "max_new_tokens": self.max_new_tokens,
+                    "qual_log_every_n_steps": self.qual_log_every_n_steps,
+                    "qual_num_samples_per_split": self.qual_num_samples_per_split,
+                    "qual_sampling_temperature": self.qual_sampling_temperature,
+                    "qual_sampling_top_p": self.qual_sampling_top_p,
                     "max_train_examples": self.max_train_examples,
                     "max_val_examples": self.max_val_examples,
                     "use_lora": self.use_lora,
@@ -380,6 +641,22 @@ class InfillingAutoregressiveTrainer:
             pad_token_id=self.tokenizer.pad_token_id,
         )
 
+        callbacks = []
+        if self.wandb_enabled and wandb_module is not None:
+            callbacks.append(
+                WandbQualitativeCallback(
+                    wandb_module=wandb_module,
+                    tokenizer=self.tokenizer,
+                    max_new_tokens=self.max_new_tokens,
+                    train_dataset=train_dataset,
+                    eval_dataset=eval_dataset,
+                    log_every_n_steps=self.qual_log_every_n_steps,
+                    num_samples_per_split=self.qual_num_samples_per_split,
+                    temperature=self.qual_sampling_temperature,
+                    top_p=self.qual_sampling_top_p,
+                )
+            )
+
         trainer = Trainer(
             model=self.model,
             args=self.training_args,
@@ -387,6 +664,7 @@ class InfillingAutoregressiveTrainer:
             eval_dataset=eval_dataset,
             data_collator=data_collator,
             tokenizer=self.tokenizer,
+            callbacks=callbacks,
         )
         trainer.remove_callback(PrinterCallback)
         trainer.remove_callback(ProgressCallback)
