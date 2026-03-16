@@ -70,6 +70,27 @@ def load_manifest(manifest_path: Path) -> list[dict[str, Any]]:
     return read_jsonl(manifest_path)
 
 
+def resolve_manifest_paths(manifest_path: Path, split_name: str) -> list[Path]:
+    """Resolve a manifest input into one or more manifest files.
+
+    Accepts either:
+    - a single manifest file, or
+    - a directory containing one or more *.manifest.jsonl files.
+    """
+    if manifest_path.is_file():
+        return [manifest_path]
+    if manifest_path.is_dir():
+        paths = sorted(manifest_path.rglob("*.manifest.jsonl"))
+        if not paths:
+            raise FileNotFoundError(
+                f"No manifest files found under {split_name} directory: {manifest_path}"
+            )
+        return paths
+    raise FileNotFoundError(
+        f"{split_name} manifest path is neither file nor directory: {manifest_path}"
+    )
+
+
 def infer_full_name(code: str, default_name: str) -> str:
     """Extract theorem name from code or use default."""
     m = re.search(r"\b(?:theorem|lemma)\s+([A-Za-z0-9_'.]+)", code)
@@ -668,7 +689,8 @@ def main() -> None:
         default=DEFAULT_TRAIN_MANIFEST_PATH,
         dest="train_manifest_path",
         help=(
-            "Path to the train manifest JSONL file that maps row indices to file paths "
+            "Path to train manifest input. Accepts either a JSONL manifest file or "
+            "a directory containing *.manifest.jsonl files "
             f"(default: {DEFAULT_TRAIN_MANIFEST_PATH})"
         ),
     )
@@ -677,7 +699,8 @@ def main() -> None:
         type=Path,
         default=None,
         help=(
-            "Optional path to a separate validation manifest JSONL. "
+            "Optional path to separate validation manifest input. Accepts either "
+            "a JSONL file or a directory containing *.manifest.jsonl files. "
             "If provided, creates infilling datasets for both train and val. "
             f"(default: {DEFAULT_VAL_MANIFEST_PATH})"
         ),
@@ -844,23 +867,48 @@ def main() -> None:
         progress.close()
         return examples, failures, reasons
 
-    # Process train manifest
-    print(f"[train] Loading manifest from {args.train_manifest_path}")
-    train_examples, train_failures, train_reasons = process_manifest(
-        args.train_manifest_path, "Processing train manifest"
+    # Resolve train manifests (single file or directory of manifests)
+    train_manifest_paths = resolve_manifest_paths(args.train_manifest_path, "train")
+    print(
+        f"[train] Using {len(train_manifest_paths)} manifest(s) from "
+        f"{args.train_manifest_path}"
     )
-    print(f"[train] Processed {len(train_examples)} examples, {len(train_failures)} failures")
+    train_examples: list[dict[str, Any]] = []
+    train_failures: list[dict[str, Any]] = []
+    train_reasons: Counter[str] = Counter()
+    for manifest_path in train_manifest_paths:
+        print(f"[train] Loading manifest from {manifest_path}")
+        examples, failures, reasons = process_manifest(
+            manifest_path, f"Processing train manifest ({manifest_path.name})"
+        )
+        train_examples.extend(examples)
+        train_failures.extend(failures)
+        train_reasons += reasons
+    print(
+        f"[train] Processed {len(train_examples)} examples, {len(train_failures)} failures"
+    )
 
     # Process val manifest if provided (separate from val-ratio split)
     val_examples: list[dict[str, Any]] = []
     val_failures: list[dict[str, Any]] = []
     val_reasons: Counter[str] = Counter()
     if args.val_manifest_path is not None:
-        print(f"[val] Loading manifest from {args.val_manifest_path}")
-        val_examples, val_failures, val_reasons = process_manifest(
-            args.val_manifest_path, "Processing val manifest"
+        val_manifest_paths = resolve_manifest_paths(args.val_manifest_path, "val")
+        print(
+            f"[val] Using {len(val_manifest_paths)} manifest(s) from "
+            f"{args.val_manifest_path}"
         )
-        print(f"[val] Processed {len(val_examples)} examples, {len(val_failures)} failures")
+        for manifest_path in val_manifest_paths:
+            print(f"[val] Loading manifest from {manifest_path}")
+            examples, failures, reasons = process_manifest(
+                manifest_path, f"Processing val manifest ({manifest_path.name})"
+            )
+            val_examples.extend(examples)
+            val_failures.extend(failures)
+            val_reasons += reasons
+        print(
+            f"[val] Processed {len(val_examples)} examples, {len(val_failures)} failures"
+        )
 
     # Combine for output
     all_examples = train_examples + val_examples
