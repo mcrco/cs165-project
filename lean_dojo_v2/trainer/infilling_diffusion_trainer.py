@@ -213,33 +213,26 @@ class InfillingMDMDataset:
                     continue
                 right_ids = right_ids[:available_for_right]
 
-            mask_span = [self.mask_token_id] * self.mask_span_length
-            assistant_ids = left_ids + mask_span + right_ids
-            input_ids = prompt_ids + assistant_ids
-
             target_ids = self.tokenizer(
                 target_tactic,
                 add_special_tokens=False,
             )["input_ids"]
+            max_target_len = max(0, self.mask_span_length - 1)
+            if len(target_ids) > max_target_len:
+                target_ids = target_ids[:max_target_len]
             target_plus_eos = target_ids + [eos_id]
+            n_mask_pad = max(0, self.mask_span_length - len(target_plus_eos))
+            span_tokens = target_plus_eos + ([self.mask_token_id] * n_mask_pad)
 
-            labels = [-100] * len(input_ids)
+            assistant_ids = left_ids + span_tokens + right_ids
+            input_ids = prompt_ids + assistant_ids
             assistant_start = len(prompt_ids)
             mask_start = assistant_start + len(left_ids)
             mask_end = mask_start + self.mask_span_length
 
-            for i, tid in enumerate(target_plus_eos):
-                if mask_start + i < mask_end:
-                    labels[mask_start + i] = tid
-
-            for i in range(len(target_plus_eos), self.mask_span_length):
-                if mask_start + i < mask_end:
-                    labels[mask_start + i] = self.mask_token_id
-
             processed.append(
                 {
                     "input_ids": input_ids,
-                    "labels": labels,
                     "assistant_start": assistant_start,
                     "mask_start": mask_start,
                     "mask_end": mask_end,
@@ -259,11 +252,23 @@ class InfillingMDMDataset:
 
 
 class InfillingMDMCollator:
-    """Simple padding collator for pre-masked infilling examples."""
+    """Padding collator with random masking over infilling spans."""
 
-    def __init__(self, tokenizer, pad_token_id: Optional[int] = None):
+    def __init__(
+        self,
+        tokenizer,
+        mask_token_id: int,
+        pad_token_id: Optional[int] = None,
+        min_mask_ratio: float = 0.01,
+        max_mask_ratio: float = 1.0,
+    ):
         self.tokenizer = tokenizer
+        self.mask_token_id = mask_token_id
         self.pad_token_id = pad_token_id if pad_token_id is not None else tokenizer.pad_token_id
+        if not (0.0 < min_mask_ratio <= max_mask_ratio <= 1.0):
+            raise ValueError("Mask ratios must satisfy 0 < min <= max <= 1")
+        self.min_mask_ratio = min_mask_ratio
+        self.max_mask_ratio = max_mask_ratio
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         max_len = max(len(f["input_ids"]) for f in features)
@@ -281,7 +286,31 @@ class InfillingMDMCollator:
             seq_len = len(feature["input_ids"])
             input_ids[i, :seq_len] = torch.tensor(feature["input_ids"], dtype=torch.long)
             attention_mask[i, :seq_len] = 1
-            labels[i, :seq_len] = torch.tensor(feature["labels"], dtype=torch.long)
+
+            mask_start = int(feature.get("mask_start", -1))
+            mask_end = int(feature.get("mask_end", -1))
+            if mask_start < 0 or mask_end <= mask_start:
+                continue
+            mask_end = min(mask_end, seq_len)
+            if mask_end <= mask_start:
+                continue
+
+            span_ids = input_ids[i, mask_start:mask_end].clone()
+            span_positions = torch.arange(mask_start, mask_end, dtype=torch.long)
+
+            pad_positions = span_positions[span_ids == self.mask_token_id]
+            real_positions = span_positions[span_ids != self.mask_token_id]
+
+            # Keep pad positions masked so the model learns to emit stop/pad mask tokens.
+            if pad_positions.numel() > 0:
+                labels[i, pad_positions] = input_ids[i, pad_positions]
+
+            if real_positions.numel() > 0:
+                mask_ratio = torch.empty(1).uniform_(self.min_mask_ratio, self.max_mask_ratio).item()
+                num_to_mask = max(1, int(round(real_positions.numel() * mask_ratio)))
+                chosen = real_positions[torch.randperm(real_positions.numel())[:num_to_mask]]
+                labels[i, chosen] = input_ids[i, chosen]
+                input_ids[i, chosen] = self.mask_token_id
 
         return {
             "input_ids": input_ids,
@@ -881,6 +910,7 @@ class InfillingDiffusionTrainer:
         # Create collator
         data_collator = InfillingMDMCollator(
             tokenizer=self.tokenizer,
+            mask_token_id=self.mask_token_id,
             pad_token_id=self.tokenizer.pad_token_id,
         )
 
