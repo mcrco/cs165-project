@@ -37,12 +37,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--train-path",
-        default="datasets/april/leandojo_infilling/train.train.jsonl",
+        default="datasets/april/leandojo_infilling/thme.train.jsonl",
         help="Path to training dataset (JSON or JSONL).",
     )
     parser.add_argument(
         "--val-path",
-        default="datasets/april/leandojo_infilling/train.val.jsonl",
+        default="datasets/april/leandojo_infilling/thme.val.jsonl",
         help="Path to validation dataset (JSON or JSONL). If missing, validation is disabled.",
     )
     parser.add_argument(
@@ -59,6 +59,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--save-strategy", default="epoch")
     parser.add_argument("--qual-log-every-n-steps", type=int, default=200)
     parser.add_argument("--qual-num-samples-per-split", type=int, default=64)
+    parser.add_argument(
+        "--qual-sampling-steps",
+        type=int,
+        default=16,
+        help="Diffusion denoising steps for qualitative sample logging.",
+    )
     parser.add_argument(
         "--max-train-examples",
         type=_optional_positive_int,
@@ -147,6 +153,7 @@ def main() -> None:
         wandb_run_name=args.wandb_run_name,
         qual_log_every_n_steps=args.qual_log_every_n_steps,
         qual_num_samples_per_split=args.qual_num_samples_per_split,
+        qual_sampling_steps=args.qual_sampling_steps,
         max_train_examples=args.max_train_examples,
         max_val_examples=args.max_val_examples,
         trust_remote_code=args.trust_remote_code,

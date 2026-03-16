@@ -35,12 +35,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-name", default="Qwen/Qwen2.5-7B")
     parser.add_argument(
         "--train-path",
-        default="datasets/april/leandojo_infilling/train.train.jsonl",
+        default="datasets/april/leandojo_infilling/thme.train.jsonl",
         help="Path to training dataset (JSON or JSONL).",
     )
     parser.add_argument(
         "--val-path",
-        default="datasets/april/leandojo_infilling/train.val.jsonl",
+        default="datasets/april/leandojo_infilling/thme.val.jsonl",
         help="Path to validation dataset (JSON or JSONL). If missing, validation is disabled.",
     )
     parser.add_argument(

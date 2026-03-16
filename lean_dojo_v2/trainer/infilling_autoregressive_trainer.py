@@ -426,9 +426,10 @@ class WandbQualitativeCallback(TrainerCallback):
                 model.train()
 
     def on_step_end(self, args, state, control, model=None, **kwargs):
+        return
+
+    def on_epoch_end(self, args, state, control, model=None, **kwargs):
         if model is None or state.global_step <= 0:
-            return
-        if state.global_step % self.log_every_n_steps != 0:
             return
         try:
             self._maybe_log_split(
@@ -438,7 +439,10 @@ class WandbQualitativeCallback(TrainerCallback):
                 epoch=float(state.epoch) if state.epoch is not None else None,
             )
         except Exception as exc:
-            print(f"[wandb] train qualitative logging failed at step {state.global_step}: {exc}")
+            print(
+                f"[wandb] train qualitative logging failed at epoch end "
+                f"(step {state.global_step}): {exc}"
+            )
 
     def on_evaluate(self, args, state, control, model=None, **kwargs):
         if model is None:

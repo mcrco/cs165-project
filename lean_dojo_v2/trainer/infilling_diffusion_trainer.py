@@ -45,6 +45,13 @@ def _normalize_tactic_for_exact_match(value: Any) -> str:
     return re.sub(r"\s+", "", text)
 
 
+def _truncate_text_for_table(value: Any, max_chars: int) -> str:
+    text = _normalize_optional_text(value)
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    return text[: max_chars - 3] + "..."
+
+
 def _build_infilling_user_content(theorem_statement: str) -> str:
     chunks: List[str] = [
         "Implement a Lean 4 proof for the given formal statement.",
@@ -276,6 +283,7 @@ class WandbQualitativeCallback(TrainerCallback):
         seed: int = 0,
         log_history_table: bool = True,
         log_snapshot_table: bool = False,
+        max_cell_chars: int = 4096,
     ):
         self.wandb = wandb_module
         self.tokenizer = tokenizer
@@ -290,6 +298,7 @@ class WandbQualitativeCallback(TrainerCallback):
         self.seed = seed
         self.log_history_table = bool(log_history_table)
         self.log_snapshot_table = bool(log_snapshot_table)
+        self.max_cell_chars = max(128, int(max_cell_chars))
         self._last_logged_step_by_split: Dict[str, Optional[int]] = {
             "train": None,
             "val": None,
@@ -358,15 +367,16 @@ class WandbQualitativeCallback(TrainerCallback):
                 "('assistant_start') schema for qualitative sampling."
             )
 
-        sampled = denoise_masked_sequence(
-            model=model,
-            input_ids=masked_input,
-            attention_mask=attention_mask,
-            mask_token_id=self.mask_token_id,
-            steps=self.sampling_steps,
-            temperature=self.sampling_temperature,
-            remasking=self.sampling_remasking,
-        )
+        with torch.inference_mode():
+            sampled = denoise_masked_sequence(
+                model=model,
+                input_ids=masked_input,
+                attention_mask=attention_mask,
+                mask_token_id=self.mask_token_id,
+                steps=self.sampling_steps,
+                temperature=self.sampling_temperature,
+                remasking=self.sampling_remasking,
+            )
         predicted_ids = sampled[0].tolist()
         predicted_span = [predicted_ids[pos] for pos in supervised_positions]
         return self._decode_predicted_tactic(predicted_span)
@@ -417,10 +427,10 @@ class WandbQualitativeCallback(TrainerCallback):
             record = (
                 split,
                 int(idx),
-                theorem,
-                prompt,
-                expected_tactic,
-                predicted_tactic,
+                _truncate_text_for_table(theorem, self.max_cell_chars),
+                _truncate_text_for_table(prompt, self.max_cell_chars),
+                _truncate_text_for_table(expected_tactic, self.max_cell_chars),
+                _truncate_text_for_table(predicted_tactic, self.max_cell_chars),
                 step,
                 float(epoch) if epoch is not None else None,
             )
@@ -481,9 +491,10 @@ class WandbQualitativeCallback(TrainerCallback):
                 model.train()
 
     def on_step_end(self, args, state, control, model=None, **kwargs):
+        return
+
+    def on_epoch_end(self, args, state, control, model=None, **kwargs):
         if model is None or state.global_step <= 0:
-            return
-        if state.global_step % self.log_every_n_steps != 0:
             return
         try:
             self._maybe_log_split(
@@ -493,7 +504,10 @@ class WandbQualitativeCallback(TrainerCallback):
                 epoch=float(state.epoch) if state.epoch is not None else None,
             )
         except Exception as exc:
-            print(f"[wandb] train qualitative logging failed at step {state.global_step}: {exc}")
+            print(
+                f"[wandb] train qualitative logging failed at epoch end "
+                f"(step {state.global_step}): {exc}"
+            )
 
     def on_evaluate(self, args, state, control, model=None, **kwargs):
         if model is None:
@@ -534,6 +548,7 @@ class InfillingDiffusionTrainer:
         wandb_run_name: Optional[str] = None,
         qual_log_every_n_steps: int = 200,
         qual_num_samples_per_split: int = 64,
+        qual_sampling_steps: int = 16,
         max_train_examples: Optional[int] = None,
         max_val_examples: Optional[int] = None,
         trust_remote_code: bool = True,
@@ -558,6 +573,7 @@ class InfillingDiffusionTrainer:
         self.wandb_run_name = wandb_run_name
         self.qual_log_every_n_steps = qual_log_every_n_steps
         self.qual_num_samples_per_split = qual_num_samples_per_split
+        self.qual_sampling_steps = qual_sampling_steps
         self.max_train_examples = max_train_examples
         self.max_val_examples = max_val_examples
         self.wandb_enabled = bool(wandb_project)
@@ -761,6 +777,7 @@ class InfillingDiffusionTrainer:
                     "mask_span_length": self.mask_span_length,
                     "qual_log_every_n_steps": self.qual_log_every_n_steps,
                     "qual_num_samples_per_split": self.qual_num_samples_per_split,
+                    "qual_sampling_steps": self.qual_sampling_steps,
                     "max_train_examples": self.max_train_examples,
                     "max_val_examples": self.max_val_examples,
                     "use_lora": self.use_lora,
@@ -796,6 +813,7 @@ class InfillingDiffusionTrainer:
                     eval_dataset=eval_dataset,
                     log_every_n_steps=self.qual_log_every_n_steps,
                     num_samples_per_split=self.qual_num_samples_per_split,
+                    sampling_steps=self.qual_sampling_steps,
                 )
             )
 
