@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import re
 from pathlib import Path
@@ -52,6 +53,55 @@ def _truncate_text_for_table(value: Any, max_chars: int) -> str:
     if max_chars <= 0 or len(text) <= max_chars:
         return text
     return text[: max_chars - 3] + "..."
+
+
+def _is_main_process() -> bool:
+    rank = os.getenv("RANK")
+    if rank is not None:
+        try:
+            return int(rank) == 0
+        except ValueError:
+            pass
+
+    local_rank = os.getenv("LOCAL_RANK")
+    if local_rank is not None:
+        try:
+            return int(local_rank) == 0
+        except ValueError:
+            pass
+
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        return torch.distributed.get_rank() == 0
+
+    return True
+
+
+def _distributed_rank() -> int:
+    rank = os.getenv("RANK")
+    if rank is not None:
+        try:
+            return int(rank)
+        except ValueError:
+            pass
+
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        return torch.distributed.get_rank()
+
+    return 0
+
+
+def _world_size() -> int:
+    world_size = os.getenv("WORLD_SIZE")
+    if world_size is not None:
+        try:
+            return int(world_size)
+        except ValueError:
+            pass
+
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        return torch.distributed.get_world_size()
+
+    return 1
 
 
 def _build_infilling_user_content(theorem_statement: str) -> str:
@@ -794,6 +844,7 @@ class InfillingDiffusionTrainer:
         self.max_train_examples = max_train_examples
         self.max_val_examples = max_val_examples
         self.wandb_enabled = bool(wandb_project)
+        self.is_main_process = _is_main_process()
         self.trust_remote_code = trust_remote_code
 
         # Auto-detect bf16 if not specified
@@ -832,7 +883,7 @@ class InfillingDiffusionTrainer:
             bf16=self.bf16,
             fp16=False,
             remove_unused_columns=False,
-            report_to=["wandb"] if self.wandb_enabled else "none",
+            report_to=["wandb"] if self.wandb_enabled and self.is_main_process else "none",
             save_strategy=save_strategy,
             eval_strategy=eval_strategy,
             logging_steps=logging_steps,
@@ -849,6 +900,19 @@ class InfillingDiffusionTrainer:
         model = get_peft_model(self.model, self.lora_config)
         model.print_trainable_parameters()
         return model
+
+    def _ensure_lora_trainable(self) -> int:
+        if not self.use_lora:
+            return sum(1 for param in self.model.parameters() if param.requires_grad)
+
+        trainable_tensors = 0
+        for name, param in self.model.named_parameters():
+            should_train = "lora_" in name
+            if param.requires_grad != should_train:
+                param.requires_grad = should_train
+            if should_train:
+                trainable_tensors += 1
+        return trainable_tensors
 
     def _load_dataset(self, data_path: str, max_examples: Optional[int] = None) -> Dataset:
         """Load and process dataset."""
@@ -968,7 +1032,7 @@ class InfillingDiffusionTrainer:
     def train(self):
         """Run training."""
         wandb_module = None
-        if self.wandb_enabled:
+        if self.wandb_enabled and self.is_main_process:
             import wandb
 
             wandb.init(
@@ -1044,6 +1108,12 @@ class InfillingDiffusionTrainer:
         trainer.remove_callback(PrinterCallback)
         trainer.remove_callback(ProgressCallback)
         trainer.add_callback(QuietProgressCallback())
+        trainable_tensors = self._ensure_lora_trainable()
+        if _world_size() > 1:
+            print(
+                f"[rank {_distributed_rank()}] trainable parameter tensors before DDP wrap: "
+                f"{trainable_tensors}"
+            )
         try:
             # Train
             print("Starting training...")

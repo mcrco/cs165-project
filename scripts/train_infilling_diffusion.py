@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
+import torch
 from peft import LoraConfig, TaskType
 
 from lean_dojo_v2.trainer.infilling_diffusion_trainer import InfillingDiffusionTrainer
@@ -36,6 +37,14 @@ def _mask_ratio(value: str) -> float:
 def _safe_dir_component(value: str) -> str:
     normalized = value.strip().replace("/", "-").replace("\\", "-").replace(" ", "-")
     return normalized or "run"
+
+
+def _set_local_cuda_device() -> None:
+    local_rank = os.getenv("LOCAL_RANK")
+    if local_rank is None or not torch.cuda.is_available():
+        return
+
+    torch.cuda.set_device(int(local_rank))
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -142,6 +151,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = _build_parser().parse_args()
+    _set_local_cuda_device()
     if args.min_mask_ratio > args.max_mask_ratio:
         raise ValueError("--min-mask-ratio must be <= --max-mask-ratio.")
     output_dir = args.output_dir or str(Path("outputs") / _safe_dir_component(args.wandb_run_name))

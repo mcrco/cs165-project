@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import re
 from pathlib import Path
@@ -37,6 +38,27 @@ def _normalize_tactic_for_exact_match(value: Any) -> str:
         return ""
     text = str(value).strip()
     return re.sub(r"\s+", "", text)
+
+
+def _is_main_process() -> bool:
+    rank = os.getenv("RANK")
+    if rank is not None:
+        try:
+            return int(rank) == 0
+        except ValueError:
+            pass
+
+    local_rank = os.getenv("LOCAL_RANK")
+    if local_rank is not None:
+        try:
+            return int(local_rank) == 0
+        except ValueError:
+            pass
+
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        return torch.distributed.get_rank() == 0
+
+    return True
 
 
 def _build_ar_infilling_prompt_prefix(
@@ -656,6 +678,7 @@ class InfillingAutoregressiveTrainer:
         self.max_train_examples = max_train_examples
         self.max_val_examples = max_val_examples
         self.wandb_enabled = bool(wandb_project)
+        self.is_main_process = _is_main_process()
         self.trust_remote_code = trust_remote_code
 
         if bf16 is None:
@@ -686,7 +709,7 @@ class InfillingAutoregressiveTrainer:
             bf16=self.bf16,
             fp16=False,
             remove_unused_columns=False,
-            report_to=["wandb"] if self.wandb_enabled else "none",
+            report_to=["wandb"] if self.wandb_enabled and self.is_main_process else "none",
             save_strategy=save_strategy,
             eval_strategy=eval_strategy,
             logging_steps=logging_steps,
@@ -767,7 +790,7 @@ class InfillingAutoregressiveTrainer:
 
     def train(self):
         wandb_module = None
-        if self.wandb_enabled:
+        if self.wandb_enabled and self.is_main_process:
             try:
                 import wandb  # type: ignore
             except ImportError as exc:
