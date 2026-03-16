@@ -4,8 +4,8 @@
 #SBATCH --error=/resnick/groups/tensorlab/myang2/cs165-project/logs/slurm/%x-%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:nvidia_h200:1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=80G
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=128G
 #SBATCH --time=24:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -54,4 +54,19 @@ CMD+=("$@")
 # Avoid inheriting restrictive CPU bind masks when this batch job is submitted
 # from inside an existing salloc/srun shell.
 unset SLURM_CPU_BIND SLURM_CPU_BIND_LIST SLURM_CPU_BIND_TYPE
-srun --cpu-bind=none "${CMD[@]}"
+
+# Infer process count from allocated GPUs on this node.
+NPROC_PER_NODE="${SLURM_GPUS_ON_NODE:-1}"
+if ! [[ "$NPROC_PER_NODE" =~ ^[0-9]+$ ]] || [[ "$NPROC_PER_NODE" -lt 1 ]]; then
+  echo "Invalid NPROC_PER_NODE='$NPROC_PER_NODE' (must be a positive integer)." >&2
+  exit 1
+fi
+echo "Launching $NPROC_PER_NODE process(es) on this node."
+
+if [[ "$NPROC_PER_NODE" -gt 1 ]]; then
+  srun --cpu-bind=none \
+    uv run torchrun --standalone --nnodes=1 --nproc_per_node="$NPROC_PER_NODE" \
+    scripts/train_infilling_diffusion.py "$@"
+else
+  srun --cpu-bind=none "${CMD[@]}"
+fi
