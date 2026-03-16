@@ -37,6 +37,8 @@ cd "$PROJECT_DIR"
 
 export TOKENIZERS_PARALLELISM=false
 export WANDB_PROJECT="${WANDB_PROJECT:-infilling-ar}"
+# Ensure local package imports (e.g., lean_dojo_v2.*) resolve in torchrun workers.
+export PYTHONPATH="$PROJECT_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
 echo "=============================================="
 echo "Job ID:        $SLURM_JOB_ID"
