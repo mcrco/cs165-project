@@ -234,6 +234,47 @@ class MdlmTrainer(Trainer):
         )
         return (loss, outputs) if return_outputs else loss
 
+    def _compute_mean_eval_loss(self, eval_dataset: Optional[Dataset] = None) -> float:
+        """Compute mean eval loss when HF metrics omit it."""
+        dataloader = self.get_eval_dataloader(eval_dataset)
+        losses: List[float] = []
+        model = self.model
+        was_training = model.training
+        model.eval()
+        try:
+            for inputs in dataloader:
+                prepared = self._prepare_inputs(inputs)
+                if "labels" not in prepared:
+                    continue
+                # compute_loss mutates `inputs` by popping labels; copy defensively.
+                loss = self.compute_loss(model, dict(prepared))
+                if loss is None:
+                    continue
+                losses.append(loss.detach().float().mean().item())
+        finally:
+            if was_training:
+                model.train()
+
+        if not losses:
+            return float("nan")
+        return float(sum(losses) / len(losses))
+
+    def evaluate(
+        self,
+        eval_dataset: Optional[Dataset] = None,
+        ignore_keys: Optional[List[str]] = None,
+        metric_key_prefix: str = "eval",
+    ) -> Dict[str, float]:
+        metrics = super().evaluate(
+            eval_dataset=eval_dataset,
+            ignore_keys=ignore_keys,
+            metric_key_prefix=metric_key_prefix,
+        )
+        loss_key = f"{metric_key_prefix}_loss"
+        if loss_key not in metrics:
+            metrics[loss_key] = self._compute_mean_eval_loss(eval_dataset=eval_dataset)
+        return metrics
+
 
 class QuietProgressCallback(ProgressCallback):
     """Keep tqdm progress bars without printing per-step metric dicts."""
