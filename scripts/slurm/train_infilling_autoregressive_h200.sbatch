@@ -55,4 +55,7 @@ if [[ -n "$MAX_DATASET_SIZE" ]]; then
   CMD+=(--max-train-examples "$MAX_DATASET_SIZE" --max-val-examples "$MAX_DATASET_SIZE")
 fi
 
-srun "${CMD[@]}"
+# Avoid inheriting restrictive CPU bind masks when this batch job is submitted
+# from inside an existing salloc/srun shell.
+unset SLURM_CPU_BIND SLURM_CPU_BIND_LIST SLURM_CPU_BIND_TYPE
+srun --cpu-bind=none "${CMD[@]}"
