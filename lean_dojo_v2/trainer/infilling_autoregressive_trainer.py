@@ -292,6 +292,7 @@ class WandbQualitativeCallback(TrainerCallback):
         ]
         self.train_history_rows: List[Tuple[Any, ...]] = []
         self.val_history_rows: List[Tuple[Any, ...]] = []
+        self._last_full_eval_step: Optional[int] = None
 
     def _rows_to_table(self, rows: List[Tuple[Any, ...]]):
         table = self.wandb.Table(columns=self._qual_columns)
@@ -418,6 +419,47 @@ class WandbQualitativeCallback(TrainerCallback):
             else:
                 self.wandb.log(payload, step=max(step, int(current_step)))
 
+    def _log_full_eval_exact_match(
+        self,
+        *,
+        model,
+        step: int,
+        epoch: Optional[float],
+    ) -> None:
+        if self.eval_dataset is None or len(self.eval_dataset) == 0:
+            return
+
+        num_examples = 0
+        num_exact_matches = 0
+        for idx in range(len(self.eval_dataset)):
+            row = self.eval_dataset[idx]
+            expected_tactic = row.get("target_tactic", "")
+            predicted_tactic = self._predict_tactic(model, row)
+            expected_norm = _normalize_tactic_for_exact_match(expected_tactic)
+            predicted_norm = _normalize_tactic_for_exact_match(predicted_tactic)
+            num_examples += 1
+            if expected_norm and expected_norm == predicted_norm:
+                num_exact_matches += 1
+
+        exact_match_accuracy = (
+            float(num_exact_matches) / float(num_examples) if num_examples > 0 else 0.0
+        )
+        payload: Dict[str, Any] = {
+            "val_full_exact_match_accuracy": exact_match_accuracy,
+            "val_full_num_samples": num_examples,
+            "val_full_num_exact_matches": num_exact_matches,
+        }
+        if epoch is not None:
+            payload["val_full_epoch"] = float(epoch)
+
+        # Keep full-eval logs monotonic with the main trainer's W&B step.
+        run = getattr(self.wandb, "run", None)
+        current_step = getattr(run, "step", None)
+        if current_step is None:
+            self.wandb.log(payload, step=step)
+        else:
+            self.wandb.log(payload, step=max(step, int(current_step)))
+
     def _maybe_log_split(
         self,
         *,
@@ -477,15 +519,27 @@ class WandbQualitativeCallback(TrainerCallback):
     def on_evaluate(self, args, state, control, model=None, **kwargs):
         if model is None:
             return
+        was_training = model.training
         try:
+            model.eval()
             self._maybe_log_split(
                 model=model,
                 split="val",
                 step=state.global_step,
                 epoch=float(state.epoch) if state.epoch is not None else None,
             )
+            if self._last_full_eval_step != state.global_step:
+                self._last_full_eval_step = state.global_step
+                self._log_full_eval_exact_match(
+                    model=model,
+                    step=state.global_step,
+                    epoch=float(state.epoch) if state.epoch is not None else None,
+                )
         except Exception as exc:
             print(f"[wandb] qualitative eval logging failed at step {state.global_step}: {exc}")
+        finally:
+            if was_training:
+                model.train()
 
 
 class InfillingAutoregressiveTrainer:
