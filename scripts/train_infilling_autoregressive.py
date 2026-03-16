@@ -48,8 +48,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default="outputs/infilling-ar-qwen2.5-7b-april",
         help="Directory to save checkpoints and final model.",
     )
-    parser.add_argument("--epochs", type=float, default=3.0)
-    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--epochs", type=float, default=20.0)
+    parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument("--max-length", type=int, default=1024)
     parser.add_argument("--max-new-tokens", type=int, default=128)
