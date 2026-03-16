@@ -301,7 +301,6 @@ class WandbQualitativeCallback(TrainerCallback):
         mask_token_id: int,
         train_dataset: Dataset,
         eval_dataset: Optional[Dataset],
-        log_every_n_steps: int,
         num_samples_per_split: int,
         sampling_steps: int = DEFAULT_DIFFUSION_STEPS,
         sampling_temperature: float = DEFAULT_DIFFUSION_TEMPERATURE,
@@ -316,7 +315,6 @@ class WandbQualitativeCallback(TrainerCallback):
         self.mask_token_id = mask_token_id
         self.train_dataset = train_dataset
         self.eval_dataset = eval_dataset
-        self.log_every_n_steps = max(1, int(log_every_n_steps))
         self.num_samples_per_split = max(1, int(num_samples_per_split))
         self.sampling_steps = max(1, int(sampling_steps))
         self.sampling_temperature = float(sampling_temperature)
@@ -477,7 +475,13 @@ class WandbQualitativeCallback(TrainerCallback):
         if snapshot_table is not None:
             payload[f"{split}_qualitative_samples_snapshot"] = snapshot_table
         if payload:
-            self.wandb.log(payload, step=step)
+            # Keep qualitative logs monotonic with the main trainer's W&B step.
+            run = getattr(self.wandb, "run", None)
+            current_step = getattr(run, "step", None)
+            if current_step is None:
+                self.wandb.log(payload, step=step)
+            else:
+                self.wandb.log(payload, step=max(step, int(current_step)))
 
     def _maybe_log_split(
         self,
@@ -572,7 +576,6 @@ class InfillingDiffusionTrainer:
         save_strategy: str = "epoch",
         wandb_project: Optional[str] = "infilling",
         wandb_run_name: Optional[str] = None,
-        qual_log_every_n_steps: int = 200,
         qual_num_samples_per_split: int = 64,
         qual_sampling_steps: int = 16,
         max_train_examples: Optional[int] = None,
@@ -597,7 +600,6 @@ class InfillingDiffusionTrainer:
         self.save_strategy = save_strategy
         self.wandb_project = wandb_project
         self.wandb_run_name = wandb_run_name
-        self.qual_log_every_n_steps = qual_log_every_n_steps
         self.qual_num_samples_per_split = qual_num_samples_per_split
         self.qual_sampling_steps = qual_sampling_steps
         self.max_train_examples = max_train_examples
@@ -802,7 +804,6 @@ class InfillingDiffusionTrainer:
                     "learning_rate": self.lr,
                     "max_length": self.max_length,
                     "mask_span_length": self.mask_span_length,
-                    "qual_log_every_n_steps": self.qual_log_every_n_steps,
                     "qual_num_samples_per_split": self.qual_num_samples_per_split,
                     "qual_sampling_steps": self.qual_sampling_steps,
                     "max_train_examples": self.max_train_examples,
@@ -838,7 +839,6 @@ class InfillingDiffusionTrainer:
                     mask_token_id=self.mask_token_id,
                     train_dataset=train_dataset,
                     eval_dataset=eval_dataset,
-                    log_every_n_steps=self.qual_log_every_n_steps,
                     num_samples_per_split=self.qual_num_samples_per_split,
                     sampling_steps=self.qual_sampling_steps,
                 )

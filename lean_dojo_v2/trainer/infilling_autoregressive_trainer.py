@@ -253,7 +253,6 @@ class WandbQualitativeCallback(TrainerCallback):
         max_new_tokens: int,
         train_dataset: Dataset,
         eval_dataset: Optional[Dataset],
-        log_every_n_steps: int,
         num_samples_per_split: int,
         temperature: float = 0.7,
         top_p: float = 0.9,
@@ -266,7 +265,6 @@ class WandbQualitativeCallback(TrainerCallback):
         self.max_new_tokens = max(1, int(max_new_tokens))
         self.train_dataset = train_dataset
         self.eval_dataset = eval_dataset
-        self.log_every_n_steps = max(1, int(log_every_n_steps))
         self.num_samples_per_split = max(1, int(num_samples_per_split))
         self.temperature = float(temperature)
         self.top_p = float(top_p)
@@ -412,7 +410,13 @@ class WandbQualitativeCallback(TrainerCallback):
         if snapshot_table is not None:
             payload[f"{split}_qualitative_samples_snapshot"] = snapshot_table
         if payload:
-            self.wandb.log(payload, step=step)
+            # Keep qualitative logs monotonic with the main trainer's W&B step.
+            run = getattr(self.wandb, "run", None)
+            current_step = getattr(run, "step", None)
+            if current_step is None:
+                self.wandb.log(payload, step=step)
+            else:
+                self.wandb.log(payload, step=max(step, int(current_step)))
 
     def _maybe_log_split(
         self,
@@ -504,7 +508,6 @@ class InfillingAutoregressiveTrainer:
         save_strategy: str = "epoch",
         wandb_project: Optional[str] = "infilling-ar",
         wandb_run_name: Optional[str] = None,
-        qual_log_every_n_steps: int = 200,
         qual_num_samples_per_split: int = 64,
         qual_sampling_temperature: float = 0.0,
         qual_sampling_top_p: float = 0.9,
@@ -530,7 +533,6 @@ class InfillingAutoregressiveTrainer:
         self.save_strategy = save_strategy
         self.wandb_project = wandb_project
         self.wandb_run_name = wandb_run_name
-        self.qual_log_every_n_steps = qual_log_every_n_steps
         self.qual_num_samples_per_split = qual_num_samples_per_split
         self.qual_sampling_temperature = qual_sampling_temperature
         self.qual_sampling_top_p = qual_sampling_top_p
@@ -670,7 +672,6 @@ class InfillingAutoregressiveTrainer:
                     "learning_rate": self.lr,
                     "max_length": self.max_length,
                     "max_new_tokens": self.max_new_tokens,
-                    "qual_log_every_n_steps": self.qual_log_every_n_steps,
                     "qual_num_samples_per_split": self.qual_num_samples_per_split,
                     "qual_sampling_temperature": self.qual_sampling_temperature,
                     "qual_sampling_top_p": self.qual_sampling_top_p,
@@ -705,7 +706,6 @@ class InfillingAutoregressiveTrainer:
                     max_new_tokens=self.max_new_tokens,
                     train_dataset=train_dataset,
                     eval_dataset=eval_dataset,
-                    log_every_n_steps=self.qual_log_every_n_steps,
                     num_samples_per_split=self.qual_num_samples_per_split,
                     temperature=self.qual_sampling_temperature,
                     top_p=self.qual_sampling_top_p,

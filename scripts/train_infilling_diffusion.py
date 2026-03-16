@@ -62,7 +62,6 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mask-span-length", type=int, default=64)
     parser.add_argument("--logging-steps", type=int, default=10)
     parser.add_argument("--save-strategy", default="epoch")
-    parser.add_argument("--qual-log-every-n-steps", type=int, default=200)
     parser.add_argument("--qual-num-samples-per-split", type=int, default=64)
     parser.add_argument(
         "--qual-sampling-steps",
@@ -157,7 +156,6 @@ def main() -> None:
         save_strategy=args.save_strategy,
         wandb_project=args.wandb_project,
         wandb_run_name=args.wandb_run_name,
-        qual_log_every_n_steps=args.qual_log_every_n_steps,
         qual_num_samples_per_split=args.qual_num_samples_per_split,
         qual_sampling_steps=args.qual_sampling_steps,
         max_train_examples=args.max_train_examples,
