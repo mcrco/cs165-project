@@ -17,6 +17,26 @@ DEFAULT_DIFFUSION_TEMPERATURE = 0.0
 DEFAULT_REMASKING = "low_confidence"
 
 
+def resolve_mask_token_id(tokenizer, fallback_id: int = 156895) -> int:
+    """Resolve the diffusion mask token id across tokenizer variants."""
+    candidates = []
+    mask_token = getattr(tokenizer, "mask_token", None)
+    if isinstance(mask_token, str) and mask_token:
+        candidates.append(mask_token)
+    candidates.extend(["<|mask|>", "<|mdm_mask|>"])
+
+    seen = set()
+    for token in candidates:
+        if token in seen:
+            continue
+        seen.add(token)
+        token_id = tokenizer.convert_tokens_to_ids(token)
+        if token_id is not None and token_id >= 0:
+            return int(token_id)
+
+    return int(fallback_id)
+
+
 def add_gumbel_noise(logits: torch.Tensor, temperature: float) -> torch.Tensor:
     """Add Gumbel noise used by diffusion token selection."""
     if temperature == 0.0:

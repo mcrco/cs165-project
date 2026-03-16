@@ -4,6 +4,8 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 
+from lean_dojo_v2.diffusion import resolve_mask_token_id
+
 CKPT = "/resnick/scratch/tram/cs165-project/outputs-diffusion-sft"
 BASE = "inclusionAI/LLaDA-MoE-7B-A1B-Instruct"
 
@@ -43,9 +45,7 @@ for f in test_files:
     if len(test_cases) >= 10:
         break
 
-mask_id = tokenizer.convert_tokens_to_ids("<|mdm_mask|>")
-if mask_id is None or mask_id < 0:
-    mask_id = 156895
+mask_id = resolve_mask_token_id(tokenizer)
 
 print("=" * 80)
 print("INFERENCE TEST: Fine-tuned diffusion model on APRIL test examples")

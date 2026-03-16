@@ -15,6 +15,7 @@ from lean_dojo_v2.diffusion import (
     DEFAULT_REMASKING,
     decode_until_stop,
     generate_llada_blockwise,
+    resolve_mask_token_id,
 )
 from lean_dojo_v2.prover.base_prover import BaseProver
 
@@ -65,9 +66,7 @@ class DiffusionProver(BaseProver):
             self.model = AutoModelForCausalLM.from_pretrained(
                 ckpt_path, config=config, trust_remote_code=trust_remote_code
             ).to(self.device)
-        self.mask_token_id = self.tokenizer.convert_tokens_to_ids("<|mdm_mask|>")
-        if self.mask_token_id is None or self.mask_token_id < 0:
-            self.mask_token_id = 156895
+        self.mask_token_id = resolve_mask_token_id(self.tokenizer)
 
         self.model.eval()
 

@@ -18,6 +18,8 @@ import torch.nn.functional as F
 from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from lean_dojo_v2.diffusion import resolve_mask_token_id
+
 
 def add_gumbel_noise(logits, temperature):
     if temperature == 0:
@@ -145,9 +147,7 @@ def main():
     model = PeftModel.from_pretrained(base_model, args.ckpt_dir)
     model.eval()
 
-    mask_id = tokenizer.convert_tokens_to_ids("<|mdm_mask|>")
-    if mask_id is None or mask_id < 0:
-        mask_id = 156895
+    mask_id = resolve_mask_token_id(tokenizer)
     print(f"Mask token ID: {mask_id}")
 
     test_cases = []

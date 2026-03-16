@@ -26,6 +26,7 @@ from datasets import Dataset
 from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback, TrainingArguments
 
+from lean_dojo_v2.diffusion import resolve_mask_token_id
 from lean_dojo_v2.trainer.diffusion_sft_trainer import (
     DiffusionDataCollator,
     DiffusionSFTDataset,
@@ -171,10 +172,7 @@ def main() -> None:
     )
     print(f"  Model loaded in {time.time() - t0:.1f}s")
 
-    mask_token_id = tokenizer.convert_tokens_to_ids("<|mdm_mask|>")
-    if mask_token_id is None or mask_token_id < 0:
-        print("  <|mdm_mask|> token not found; using LLaDA default (156895)")
-        mask_token_id = 156895
+    mask_token_id = resolve_mask_token_id(tokenizer)
 
     if args.gradient_checkpointing:
         model.enable_input_require_grads()

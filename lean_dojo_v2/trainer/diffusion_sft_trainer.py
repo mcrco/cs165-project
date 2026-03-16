@@ -24,6 +24,7 @@ from lean_dojo_v2.diffusion import (
     DEFAULT_REMASKING,
     decode_until_stop,
     denoise_masked_sequence,
+    resolve_mask_token_id,
 )
 from lean_dojo_v2.lean_dojo.data_extraction.lean import LeanGitRepo
 from lean_dojo_v2.utils import remove_marks
@@ -57,9 +58,7 @@ class DiffusionSFTDataset:
         self.max_length = max_length
         self.gen_length = gen_length
 
-        self.mask_token_id = tokenizer.convert_tokens_to_ids("<|mdm_mask|>")
-        if self.mask_token_id is None or self.mask_token_id < 0:
-            self.mask_token_id = 156895
+        self.mask_token_id = resolve_mask_token_id(tokenizer)
 
         with open(data_path, encoding="utf-8") as f:
             self.json_data = json.load(f)
@@ -282,10 +281,7 @@ class DiffusionSFTTrainer:
         if self.use_lora:
             self.model = self._apply_lora()
 
-        self.mask_token_id = self.tokenizer.convert_tokens_to_ids("<|mdm_mask|>")
-        if self.mask_token_id is None or self.mask_token_id < 0:
-            print(f"<|mdm_mask|> token not found in tokenizeer for {model_name}.")
-            self.mask_token_id = 156895  # LLaDA MoE default
+        self.mask_token_id = resolve_mask_token_id(self.tokenizer)
 
         self.training_args = TrainingArguments(
             output_dir=output_dir,

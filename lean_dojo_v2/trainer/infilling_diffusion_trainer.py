@@ -24,6 +24,7 @@ from lean_dojo_v2.diffusion import (
     DEFAULT_REMASKING,
     decode_until_stop,
     denoise_masked_sequence,
+    resolve_mask_token_id,
 )
 from .diffusion_sft_trainer import (
     MdlmTrainer,
@@ -141,9 +142,7 @@ class InfillingMDMDataset:
         self.hole_token = hole_token
         self.mask_token = mask_token
 
-        self.mask_token_id = tokenizer.convert_tokens_to_ids(mask_token)
-        if self.mask_token_id is None or self.mask_token_id < 0:
-            self.mask_token_id = 156895  # LLaDA MoE default
+        self.mask_token_id = resolve_mask_token_id(tokenizer)
 
         self.data = self._process_data(
             _iter_records_json_or_jsonl(data_path),
@@ -820,10 +819,7 @@ class InfillingDiffusionTrainer:
             self.model = self._apply_lora()
 
         # Get mask token ID
-        self.mask_token_id = self.tokenizer.convert_tokens_to_ids("<|mdm_mask|>")
-        if self.mask_token_id is None or self.mask_token_id < 0:
-            print(f"<|mdm_mask|> token not found in tokenizer for {model_name}.")
-            self.mask_token_id = 156895  # LLaDA MoE default
+        self.mask_token_id = resolve_mask_token_id(self.tokenizer)
 
         # Setup training arguments
         eval_strategy = "epoch" if val_path else "no"

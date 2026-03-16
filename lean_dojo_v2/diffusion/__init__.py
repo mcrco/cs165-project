@@ -7,6 +7,7 @@ from .sampling import (
     decode_until_stop,
     denoise_masked_sequence,
     generate_llada_blockwise,
+    resolve_mask_token_id,
 )
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "decode_until_stop",
     "denoise_masked_sequence",
     "generate_llada_blockwise",
+    "resolve_mask_token_id",
 ]
