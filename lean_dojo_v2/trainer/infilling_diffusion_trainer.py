@@ -9,6 +9,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import torch
 from datasets import Dataset
 from peft import LoraConfig, get_peft_model
+from tqdm.auto import tqdm
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -87,7 +88,12 @@ def _iter_records_json_or_jsonl(data_path: str) -> Iterable[Dict[str, Any]]:
     path = Path(data_path)
     if path.suffix.lower() == ".jsonl":
         with open(path, encoding="utf-8") as f:
-            for line in f:
+            for line in tqdm(
+                f,
+                desc=f"Loading {path.name}",
+                unit="line",
+                leave=False,
+            ):
                 line = line.strip()
                 if not line:
                     continue
@@ -99,7 +105,12 @@ def _iter_records_json_or_jsonl(data_path: str) -> Iterable[Dict[str, Any]]:
     with open(path, encoding="utf-8") as f:
         loaded = json.load(f)
     if isinstance(loaded, list):
-        for rec in loaded:
+        for rec in tqdm(
+            loaded,
+            desc=f"Loading {path.name}",
+            unit="record",
+            leave=False,
+        ):
             if isinstance(rec, dict):
                 yield rec
         return
