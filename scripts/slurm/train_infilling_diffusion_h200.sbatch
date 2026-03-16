@@ -37,6 +37,7 @@ cd "$PROJECT_DIR"
 
 export TOKENIZERS_PARALLELISM=false
 export WANDB_PROJECT="${WANDB_PROJECT:-infilling}"
+MAX_DATASET_SIZE="${MAX_DATASET_SIZE:-}"
 
 echo "=============================================="
 echo "Job ID:        $SLURM_JOB_ID"
@@ -44,8 +45,14 @@ echo "Node:          $(hostname)"
 echo "Date:          $(date -Iseconds)"
 echo "Project dir:   $PROJECT_DIR"
 echo "WANDB_PROJECT: $WANDB_PROJECT"
+echo "MAX_DATASET_SIZE: ${MAX_DATASET_SIZE:-<script-default>}"
 echo "=============================================="
 
 nvidia-smi
 
-srun uv run scripts/train_infilling_diffusion.py
+CMD=(uv run scripts/train_infilling_diffusion.py)
+if [[ -n "$MAX_DATASET_SIZE" ]]; then
+  CMD+=(--max-train-examples "$MAX_DATASET_SIZE" --max-val-examples "$MAX_DATASET_SIZE")
+fi
+
+srun "${CMD[@]}"
