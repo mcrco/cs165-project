@@ -4,7 +4,7 @@ import json
 import random
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
 from datasets import Dataset
@@ -77,11 +77,10 @@ def _build_ar_infilling_prompt_prefix(
     )
 
 
-def _load_records_json_or_jsonl(data_path: str) -> List[Dict[str, Any]]:
-    """Load dataset records from either JSON array/object or JSONL."""
+def _iter_records_json_or_jsonl(data_path: str) -> Iterable[Dict[str, Any]]:
+    """Yield dataset records from either JSON array/object or JSONL."""
     path = Path(data_path)
     if path.suffix.lower() == ".jsonl":
-        records: List[Dict[str, Any]] = []
         with open(path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -89,15 +88,19 @@ def _load_records_json_or_jsonl(data_path: str) -> List[Dict[str, Any]]:
                     continue
                 rec = json.loads(line)
                 if isinstance(rec, dict):
-                    records.append(rec)
-        return records
+                    yield rec
+        return
 
     with open(path, encoding="utf-8") as f:
         loaded = json.load(f)
     if isinstance(loaded, list):
-        return [rec for rec in loaded if isinstance(rec, dict)]
+        for rec in loaded:
+            if isinstance(rec, dict):
+                yield rec
+        return
     if isinstance(loaded, dict):
-        return [loaded]
+        yield loaded
+        return
     raise ValueError(f"Unsupported dataset payload in {data_path}: {type(loaded).__name__}")
 
 
@@ -110,23 +113,35 @@ class InfillingARDataset:
         tokenizer,
         *,
         max_length: int = 1024,
+        max_examples: Optional[int] = None,
         hole_token: str = "<HOLE>",
     ):
         self.data_path = data_path
         self.tokenizer = tokenizer
         self.max_length = max_length
+        self.max_examples = max_examples
         self.hole_token = hole_token
 
-        self.json_data = _load_records_json_or_jsonl(data_path)
-        self.data = self._process_data(self.json_data)
+        self.data = self._process_data(
+            _iter_records_json_or_jsonl(data_path),
+            max_examples=max_examples,
+        )
 
-    def _process_data(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _process_data(
+        self,
+        data: Iterable[Dict[str, Any]],
+        *,
+        max_examples: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
         processed: List[Dict[str, Any]] = []
         eos_id = self.tokenizer.eos_token_id
         if eos_id is None:
             raise ValueError("Tokenizer must define eos_token_id for AR infilling training.")
 
         for item in data:
+            if max_examples is not None and len(processed) >= max_examples:
+                break
+
             infilling = item.get("infilling", {})
             proof_with_hole = _normalize_optional_text(infilling.get("proof_with_hole", ""))
             target_tactic = _normalize_optional_text(infilling.get("target_tactic", ""))
@@ -563,6 +578,7 @@ class InfillingAutoregressiveTrainer:
             data_path=data_path,
             tokenizer=self.tokenizer,
             max_length=self.max_length,
+            max_examples=max_examples,
         )
         hf_dataset = dataset.to_hf()
         if max_examples is not None:

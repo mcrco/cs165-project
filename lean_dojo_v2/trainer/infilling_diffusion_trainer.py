@@ -4,7 +4,7 @@ import json
 import random
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
 from datasets import Dataset
@@ -82,11 +82,10 @@ def _build_infilling_prompt_prefix(tokenizer, theorem_statement: str) -> Tuple[s
     return prompt_prefix, user_content
 
 
-def _load_records_json_or_jsonl(data_path: str) -> List[Dict[str, Any]]:
-    """Load dataset records from either JSON array/object or JSONL."""
+def _iter_records_json_or_jsonl(data_path: str) -> Iterable[Dict[str, Any]]:
+    """Yield dataset records from either JSON array/object or JSONL."""
     path = Path(data_path)
     if path.suffix.lower() == ".jsonl":
-        records: List[Dict[str, Any]] = []
         with open(path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -94,15 +93,19 @@ def _load_records_json_or_jsonl(data_path: str) -> List[Dict[str, Any]]:
                     continue
                 rec = json.loads(line)
                 if isinstance(rec, dict):
-                    records.append(rec)
-        return records
+                    yield rec
+        return
 
     with open(path, encoding="utf-8") as f:
         loaded = json.load(f)
     if isinstance(loaded, list):
-        return [rec for rec in loaded if isinstance(rec, dict)]
+        for rec in loaded:
+            if isinstance(rec, dict):
+                yield rec
+        return
     if isinstance(loaded, dict):
-        return [loaded]
+        yield loaded
+        return
     raise ValueError(f"Unsupported dataset payload in {data_path}: {type(loaded).__name__}")
 
 
@@ -115,6 +118,7 @@ class InfillingMDMDataset:
         tokenizer,
         max_length: int = 1024,
         mask_span_length: int = 64,
+        max_examples: Optional[int] = None,
         hole_token: str = "<HOLE>",
         mask_token: str = "<|mdm_mask|>",
     ):
@@ -122,6 +126,7 @@ class InfillingMDMDataset:
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.mask_span_length = mask_span_length
+        self.max_examples = max_examples
         self.hole_token = hole_token
         self.mask_token = mask_token
 
@@ -129,14 +134,24 @@ class InfillingMDMDataset:
         if self.mask_token_id is None or self.mask_token_id < 0:
             self.mask_token_id = 156895  # LLaDA MoE default
 
-        self.json_data = _load_records_json_or_jsonl(data_path)
-        self.data = self._process_data(self.json_data)
+        self.data = self._process_data(
+            _iter_records_json_or_jsonl(data_path),
+            max_examples=max_examples,
+        )
 
-    def _process_data(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _process_data(
+        self,
+        data: Iterable[Dict[str, Any]],
+        *,
+        max_examples: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
         processed: List[Dict[str, Any]] = []
         eos_id = self.tokenizer.eos_token_id
 
         for item in data:
+            if max_examples is not None and len(processed) >= max_examples:
+                break
+
             infilling = item.get("infilling", {})
             proof_with_hole = infilling.get("proof_with_hole", "")
             target_tactic = infilling.get("target_tactic", "").strip()
@@ -643,6 +658,7 @@ class InfillingDiffusionTrainer:
             tokenizer=self.tokenizer,
             max_length=self.max_length,
             mask_span_length=self.mask_span_length,
+            max_examples=max_examples,
         )
         hf_dataset = dataset.to_hf()
         if max_examples is not None:
