@@ -58,13 +58,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-train-examples",
         type=_optional_positive_int,
-        default=10_000,
+        default=None,
         help="Cap train examples; use 'none' to disable cap.",
     )
     parser.add_argument(
         "--max-val-examples",
         type=_optional_positive_int,
-        default=10_000,
+        default=None,
         help="Cap val examples; use 'none' to disable cap.",
     )
     parser.add_argument(
