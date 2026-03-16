@@ -653,6 +653,8 @@ class InfillingDiffusionTrainer:
         lr: float = 2e-5,
         max_length: int = 1024,
         mask_span_length: int = 64,
+        min_mask_ratio: float = 0.01,
+        max_mask_ratio: float = 1.0,
         lora_config: Optional[LoraConfig] = None,
         bf16: Optional[bool] = None,
         logging_steps: int = 10,
@@ -677,6 +679,8 @@ class InfillingDiffusionTrainer:
         self.lr = lr
         self.max_length = max_length
         self.mask_span_length = mask_span_length
+        self.min_mask_ratio = min_mask_ratio
+        self.max_mask_ratio = max_mask_ratio
         self.lora_config = lora_config
         self.use_lora = lora_config is not None
         self.logging_steps = logging_steps
@@ -887,6 +891,8 @@ class InfillingDiffusionTrainer:
                     "learning_rate": self.lr,
                     "max_length": self.max_length,
                     "mask_span_length": self.mask_span_length,
+                    "min_mask_ratio": self.min_mask_ratio,
+                    "max_mask_ratio": self.max_mask_ratio,
                     "qual_num_samples_per_split": self.qual_num_samples_per_split,
                     "qual_sampling_steps": self.qual_sampling_steps,
                     "max_train_examples": self.max_train_examples,
@@ -912,6 +918,8 @@ class InfillingDiffusionTrainer:
             tokenizer=self.tokenizer,
             mask_token_id=self.mask_token_id,
             pad_token_id=self.tokenizer.pad_token_id,
+            min_mask_ratio=self.min_mask_ratio,
+            max_mask_ratio=self.max_mask_ratio,
         )
 
         callbacks = []

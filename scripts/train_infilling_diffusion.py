@@ -26,6 +26,13 @@ def _optional_positive_int(value: str) -> Optional[int]:
     return parsed
 
 
+def _mask_ratio(value: str) -> float:
+    parsed = float(value)
+    if not (0.0 < parsed <= 1.0):
+        raise argparse.ArgumentTypeError("Mask ratio must be in the interval (0, 1].")
+    return parsed
+
+
 def _safe_dir_component(value: str) -> str:
     normalized = value.strip().replace("/", "-").replace("\\", "-").replace(" ", "-")
     return normalized or "run"
@@ -60,6 +67,18 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument("--max-length", type=int, default=1024)
     parser.add_argument("--mask-span-length", type=int, default=64)
+    parser.add_argument(
+        "--min-mask-ratio",
+        type=_mask_ratio,
+        default=0.25,
+        help="Minimum fraction of non-pad infilling tokens to mask during training.",
+    )
+    parser.add_argument(
+        "--max-mask-ratio",
+        type=_mask_ratio,
+        default=1.0,
+        help="Maximum fraction of non-pad infilling tokens to mask during training.",
+    )
     parser.add_argument("--logging-steps", type=int, default=10)
     parser.add_argument("--save-strategy", default="epoch")
     parser.add_argument("--qual-num-samples-per-split", type=int, default=64)
@@ -123,6 +142,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = _build_parser().parse_args()
+    if args.min_mask_ratio > args.max_mask_ratio:
+        raise ValueError("--min-mask-ratio must be <= --max-mask-ratio.")
     output_dir = args.output_dir or str(Path("outputs") / _safe_dir_component(args.wandb_run_name))
 
     train_path = Path(args.train_path)
@@ -150,6 +171,8 @@ def main() -> None:
         lr=args.lr,
         max_length=args.max_length,
         mask_span_length=args.mask_span_length,
+        min_mask_ratio=args.min_mask_ratio,
+        max_mask_ratio=args.max_mask_ratio,
         lora_config=lora_config,
         bf16=args.bf16,
         logging_steps=args.logging_steps,
