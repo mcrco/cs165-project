@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import random
 import re
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -74,6 +75,30 @@ def _build_infilling_prompt_prefix(tokenizer, theorem_statement: str) -> Tuple[s
     return prompt_prefix, user_content
 
 
+def _load_records_json_or_jsonl(data_path: str) -> List[Dict[str, Any]]:
+    """Load dataset records from either JSON array/object or JSONL."""
+    path = Path(data_path)
+    if path.suffix.lower() == ".jsonl":
+        records: List[Dict[str, Any]] = []
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                if isinstance(rec, dict):
+                    records.append(rec)
+        return records
+
+    with open(path, encoding="utf-8") as f:
+        loaded = json.load(f)
+    if isinstance(loaded, list):
+        return [rec for rec in loaded if isinstance(rec, dict)]
+    if isinstance(loaded, dict):
+        return [loaded]
+    raise ValueError(f"Unsupported dataset payload in {data_path}: {type(loaded).__name__}")
+
+
 class InfillingMDMDataset:
     """Dataset for infilling-style training with MDM mask tokens embedded in proof context."""
 
@@ -97,8 +122,7 @@ class InfillingMDMDataset:
         if self.mask_token_id is None or self.mask_token_id < 0:
             self.mask_token_id = 156895  # LLaDA MoE default
 
-        with open(data_path, encoding="utf-8") as f:
-            self.json_data = json.load(f)
+        self.json_data = _load_records_json_or_jsonl(data_path)
         self.data = self._process_data(self.json_data)
 
     def _process_data(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

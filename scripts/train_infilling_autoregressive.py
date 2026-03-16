@@ -35,13 +35,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-name", default="Qwen/Qwen2.5-7B")
     parser.add_argument(
         "--train-path",
-        default="datasets/april/leandojo_infilling/train.train.json",
-        help="Path to training JSON dataset.",
+        default="datasets/april/leandojo_infilling/train.train.jsonl",
+        help="Path to training dataset (JSON or JSONL).",
     )
     parser.add_argument(
         "--val-path",
-        default="datasets/april/leandojo_infilling/train.val.json",
-        help="Path to validation JSON dataset. If missing, validation is disabled.",
+        default="datasets/april/leandojo_infilling/train.val.jsonl",
+        help="Path to validation dataset (JSON or JSONL). If missing, validation is disabled.",
     )
     parser.add_argument(
         "--output-dir",
@@ -49,7 +49,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Directory to save checkpoints and final model.",
     )
     parser.add_argument("--epochs", type=float, default=20.0)
-    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument("--max-length", type=int, default=1024)
     parser.add_argument("--max-new-tokens", type=int, default=128)

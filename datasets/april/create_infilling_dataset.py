@@ -22,7 +22,7 @@ import subprocess
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from tqdm.auto import tqdm
 
@@ -36,7 +36,7 @@ DEFAULT_PROJECT_PATH = APRIL_DIR / "april_eval_project"
 # APRIL has pre-split train/val manifests in materialized/{train,val}/
 DEFAULT_TRAIN_MANIFEST_PATH = APRIL_DIR / "materialized" / "train" / "thme_train.manifest.jsonl"
 DEFAULT_VAL_MANIFEST_PATH = APRIL_DIR / "materialized" / "val" / "thme_val.manifest.jsonl"
-DEFAULT_OUTPUT_JSON = APRIL_DIR / "leandojo_infilling" / "train.json"
+DEFAULT_OUTPUT_JSON = APRIL_DIR / "leandojo_infilling" / "train.jsonl"
 HOLE_TOKEN = "<HOLE>"
 
 
@@ -707,14 +707,23 @@ def main() -> None:
     )
     parser.add_argument(
         "--output-json",
+        "--output-path",
         type=Path,
         default=DEFAULT_OUTPUT_JSON,
+        dest="output_json",
         help=(
-            "Base output JSON path. If --val-ratio > 0, writes "
+            "Base output dataset path. If --val-ratio > 0, writes "
             "<stem>.train<suffix> and <stem>.val<suffix>; otherwise writes "
             "the full dataset to this path "
             f"(default: {DEFAULT_OUTPUT_JSON})"
         ),
+    )
+    parser.add_argument(
+        "--output-format",
+        type=str,
+        choices=["jsonl", "json"],
+        default="jsonl",
+        help="Dataset output format (default: jsonl)",
     )
     parser.add_argument(
         "--max-theorems",
@@ -791,17 +800,21 @@ def main() -> None:
     if not EXTRACT_DATA_PATH.is_file():
         raise FileNotFoundError(f"Missing ExtractData.lean at: {EXTRACT_DATA_PATH}")
 
-    def process_manifest(manifest_path: Path, desc: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], Counter[str]]:
-        """Process a single manifest and return examples, failures, and failure reasons."""
+    def process_manifest(
+        manifest_path: Path,
+        desc: str,
+        on_examples: Callable[[list[dict[str, Any]]], None],
+    ) -> tuple[int, list[dict[str, Any]], Counter[str]]:
+        """Process one manifest and stream example batches to callback."""
         manifest = load_manifest(manifest_path)
 
         if args.max_theorems is not None:
             manifest = manifest[: args.max_theorems]
 
-        examples: list[dict[str, Any]] = []
         failures: list[dict[str, Any]] = []
         reasons: Counter[str] = Counter()
         theorems_ok = 0
+        num_examples = 0
 
         progress = tqdm(
             total=len(manifest),
@@ -812,13 +825,14 @@ def main() -> None:
         def ingest_result(
             result: tuple[int, list[dict[str, Any]] | None, dict[str, Any] | None],
         ) -> None:
-            nonlocal theorems_ok
+            nonlocal theorems_ok, num_examples
             row_idx, exs, failure_rec = result
             if exs is not None:
                 theorems_ok += 1
                 if args.max_examples_per_theorem is not None:
                     exs = exs[: args.max_examples_per_theorem]
-                examples.extend(exs)
+                num_examples += len(exs)
+                on_examples(exs)
             elif failure_rec is not None:
                 failures.append(failure_rec)
                 reasons[failure_rec["reason"]] += 1
@@ -838,7 +852,7 @@ def main() -> None:
                 if progress.n % 25 == 0:
                     progress.set_postfix(
                         theorems_ok=theorems_ok,
-                        total_examples=len(examples),
+                        total_examples=num_examples,
                         failed=len(failures),
                     )
         else:
@@ -860,111 +874,214 @@ def main() -> None:
                     if progress.n % 25 == 0:
                         progress.set_postfix(
                             theorems_ok=theorems_ok,
-                            total_examples=len(examples),
+                            total_examples=num_examples,
                             failed=len(failures),
                         )
 
         progress.close()
-        return examples, failures, reasons
+        return num_examples, failures, reasons
 
-    # Resolve train manifests (single file or directory of manifests)
-    train_manifest_paths = resolve_manifest_paths(args.train_manifest_path, "train")
-    print(
-        f"[train] Using {len(train_manifest_paths)} manifest(s) from "
-        f"{args.train_manifest_path}"
-    )
-    train_examples: list[dict[str, Any]] = []
-    train_failures: list[dict[str, Any]] = []
-    train_reasons: Counter[str] = Counter()
-    for manifest_path in train_manifest_paths:
-        print(f"[train] Loading manifest from {manifest_path}")
-        examples, failures, reasons = process_manifest(
-            manifest_path, f"Processing train manifest ({manifest_path.name})"
-        )
-        train_examples.extend(examples)
-        train_failures.extend(failures)
-        train_reasons += reasons
-    print(
-        f"[train] Processed {len(train_examples)} examples, {len(train_failures)} failures"
-    )
-
-    # Process val manifest if provided (separate from val-ratio split)
-    val_examples: list[dict[str, Any]] = []
-    val_failures: list[dict[str, Any]] = []
-    val_reasons: Counter[str] = Counter()
-    if args.val_manifest_path is not None:
-        val_manifest_paths = resolve_manifest_paths(args.val_manifest_path, "val")
-        print(
-            f"[val] Using {len(val_manifest_paths)} manifest(s) from "
-            f"{args.val_manifest_path}"
-        )
-        for manifest_path in val_manifest_paths:
-            print(f"[val] Loading manifest from {manifest_path}")
-            examples, failures, reasons = process_manifest(
-                manifest_path, f"Processing val manifest ({manifest_path.name})"
-            )
-            val_examples.extend(examples)
-            val_failures.extend(failures)
-            val_reasons += reasons
-        print(
-            f"[val] Processed {len(val_examples)} examples, {len(val_failures)} failures"
-        )
-
-    # Combine for output
-    all_examples = train_examples + val_examples
-    failure_rows = train_failures + val_failures
-    failure_reasons = train_reasons + val_reasons
-
-    # Sort examples by file path and hole index for consistency
-    all_examples.sort(key=lambda ex: (ex["file_path"], ex["infilling"]["hole_index"]))
-    failure_rows.sort(key=lambda rec: rec["row_idx"])
-
-    # Determine output paths
+    # Determine output paths.
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
     train_path: Path
     val_path: Path | None = None
-
     if args.val_manifest_path is not None and args.val_ratio <= 0:
-        # Separate train/val manifests were provided - write them separately
         train_path = args.output_json.with_name(
             f"{args.output_json.stem}.train{args.output_json.suffix}"
         )
         val_path = args.output_json.with_name(
             f"{args.output_json.stem}.val{args.output_json.suffix}"
-        )
-        train_path.write_text(
-            json.dumps(train_examples, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        val_path.write_text(
-            json.dumps(val_examples, ensure_ascii=False, indent=2), encoding="utf-8"
         )
     elif args.val_ratio > 0:
-        # Split train examples using val_ratio
-        split_train, split_val = split_examples_train_val(
-            train_examples, args.val_ratio, args.seed
-        )
         train_path = args.output_json.with_name(
             f"{args.output_json.stem}.train{args.output_json.suffix}"
         )
         val_path = args.output_json.with_name(
             f"{args.output_json.stem}.val{args.output_json.suffix}"
         )
-        train_path.write_text(
-            json.dumps(split_train, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        val_path.write_text(
-            json.dumps(split_val, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        train_examples = split_train
-        val_examples = split_val
     else:
-        # No val split - write all to single file
         train_path = args.output_json
-        val_examples = []
-        train_path.write_text(
-            json.dumps(all_examples, ensure_ascii=False, indent=2), encoding="utf-8"
+
+    train_examples: list[dict[str, Any]] = []
+    val_examples: list[dict[str, Any]] = []
+    train_failures: list[dict[str, Any]] = []
+    val_failures: list[dict[str, Any]] = []
+    train_reasons: Counter[str] = Counter()
+    val_reasons: Counter[str] = Counter()
+    unique_theorems: set[tuple[str, str]] = set()
+    train_example_count = 0
+    val_example_count = 0
+
+    train_writer = None
+    val_writer = None
+    theorem_split: dict[tuple[str, str], str] = {}
+    split_rng = random.Random(args.seed)
+
+    def collect_theorems(examples: list[dict[str, Any]]) -> None:
+        for ex in examples:
+            key = (str(ex.get("file_path", "")), str(ex.get("full_name", "")))
+            unique_theorems.add(key)
+
+    def write_jsonl_batch(examples: list[dict[str, Any]], split: str) -> None:
+        nonlocal train_example_count, val_example_count
+        if not examples:
+            return
+        collect_theorems(examples)
+        writer = train_writer if split == "train" else val_writer
+        if writer is None:
+            raise RuntimeError(f"Writer for split '{split}' is not open.")
+        for ex in examples:
+            writer.write(json.dumps(ex, ensure_ascii=False) + "\n")
+        if split == "train":
+            train_example_count += len(examples)
+        else:
+            val_example_count += len(examples)
+
+    def collect_json_batch(examples: list[dict[str, Any]], split: str) -> None:
+        if not examples:
+            return
+        collect_theorems(examples)
+        if split == "train":
+            train_examples.extend(examples)
+        else:
+            val_examples.extend(examples)
+
+    if args.output_format == "jsonl":
+        train_writer = train_path.open("w", encoding="utf-8")
+        if val_path is not None:
+            val_writer = val_path.open("w", encoding="utf-8")
+
+    try:
+        if args.output_format == "jsonl":
+            if args.val_ratio > 0:
+
+                def on_train_examples(examples: list[dict[str, Any]]) -> None:
+                    split_train_batch: list[dict[str, Any]] = []
+                    split_val_batch: list[dict[str, Any]] = []
+                    for ex in examples:
+                        key = (str(ex.get("file_path", "")), str(ex.get("full_name", "")))
+                        split = theorem_split.get(key)
+                        if split is None:
+                            split = "val" if split_rng.random() < args.val_ratio else "train"
+                            theorem_split[key] = split
+                        if split == "val":
+                            split_val_batch.append(ex)
+                        else:
+                            split_train_batch.append(ex)
+                    write_jsonl_batch(split_train_batch, "train")
+                    write_jsonl_batch(split_val_batch, "val")
+
+            else:
+
+                def on_train_examples(examples: list[dict[str, Any]]) -> None:
+                    write_jsonl_batch(examples, "train")
+
+            def on_val_examples(examples: list[dict[str, Any]]) -> None:
+                write_jsonl_batch(examples, "val")
+        else:
+
+            def on_train_examples(examples: list[dict[str, Any]]) -> None:
+                collect_json_batch(examples, "train")
+
+            def on_val_examples(examples: list[dict[str, Any]]) -> None:
+                collect_json_batch(examples, "val")
+
+        # Resolve train manifests (single file or directory of manifests)
+        train_manifest_paths = resolve_manifest_paths(args.train_manifest_path, "train")
+        print(
+            f"[train] Using {len(train_manifest_paths)} manifest(s) from "
+            f"{args.train_manifest_path}"
         )
-        val_path = None
+        for manifest_path in train_manifest_paths:
+            print(f"[train] Loading manifest from {manifest_path}")
+            _, failures, reasons = process_manifest(
+                manifest_path,
+                f"Processing train manifest ({manifest_path.name})",
+                on_train_examples,
+            )
+            train_failures.extend(failures)
+            train_reasons += reasons
+
+        # Process val manifest if provided (separate from val-ratio split)
+        if args.val_manifest_path is not None:
+            val_manifest_paths = resolve_manifest_paths(args.val_manifest_path, "val")
+            print(
+                f"[val] Using {len(val_manifest_paths)} manifest(s) from "
+                f"{args.val_manifest_path}"
+            )
+            for manifest_path in val_manifest_paths:
+                print(f"[val] Loading manifest from {manifest_path}")
+                _, failures, reasons = process_manifest(
+                    manifest_path,
+                    f"Processing val manifest ({manifest_path.name})",
+                    on_val_examples,
+                )
+                val_failures.extend(failures)
+                val_reasons += reasons
+    finally:
+        if train_writer is not None:
+            train_writer.close()
+        if val_writer is not None:
+            val_writer.close()
+
+    if args.output_format == "json":
+        if args.val_manifest_path is not None and args.val_ratio <= 0:
+            # Separate train/val manifests were provided - write them separately.
+            train_examples.sort(
+                key=lambda ex: (ex["file_path"], ex["infilling"]["hole_index"])
+            )
+            val_examples.sort(
+                key=lambda ex: (ex["file_path"], ex["infilling"]["hole_index"])
+            )
+            train_path.write_text(
+                json.dumps(train_examples, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            if val_path is not None:
+                val_path.write_text(
+                    json.dumps(val_examples, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+        elif args.val_ratio > 0:
+            # Split train examples using val_ratio at theorem level.
+            split_train, split_val = split_examples_train_val(
+                train_examples, args.val_ratio, args.seed
+            )
+            split_train.sort(
+                key=lambda ex: (ex["file_path"], ex["infilling"]["hole_index"])
+            )
+            split_val.sort(
+                key=lambda ex: (ex["file_path"], ex["infilling"]["hole_index"])
+            )
+            train_examples = split_train
+            val_examples = split_val
+            train_path.write_text(
+                json.dumps(train_examples, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            if val_path is not None:
+                val_path.write_text(
+                    json.dumps(val_examples, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+        else:
+            # No val split - write all to single file.
+            all_examples = train_examples + val_examples
+            all_examples.sort(
+                key=lambda ex: (ex["file_path"], ex["infilling"]["hole_index"])
+            )
+            train_examples = all_examples
+            val_examples = []
+            train_path.write_text(
+                json.dumps(train_examples, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        train_example_count = len(train_examples)
+        val_example_count = len(val_examples)
+
+    failure_rows = train_failures + val_failures
+    failure_reasons = train_reasons + val_reasons
+    failure_rows.sort(key=lambda rec: rec["row_idx"])
 
     if args.failure_log is not None:
         args.failure_log.parent.mkdir(parents=True, exist_ok=True)
@@ -972,10 +1089,17 @@ def main() -> None:
             for rec in failure_rows:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
-    # Count unique theorems across all examples
-    total_examples = len(all_examples)
-    num_theorems = len({(ex.get("file_path"), ex.get("full_name")) for ex in all_examples})
+    total_examples = train_example_count + val_example_count
+    num_theorems = len(unique_theorems)
     num_failed = len(failure_rows)
+
+    print(
+        f"[train] Processed {train_example_count} examples, {len(train_failures)} failures"
+    )
+    if args.val_manifest_path is not None or args.val_ratio > 0:
+        print(
+            f"[val] Processed {val_example_count} examples, {len(val_failures)} failures"
+        )
 
     print(f"\nSummary:")
     print(f"  Total infilling examples: {total_examples}")
@@ -983,8 +1107,8 @@ def main() -> None:
     print(f"  Failed files: {num_failed}")
 
     if val_path is not None:
-        print(f"  Train examples: {len(train_examples)}")
-        print(f"  Val examples: {len(val_examples)}")
+        print(f"  Train examples: {train_example_count}")
+        print(f"  Val examples: {val_example_count}")
         print(f"  Wrote train: {train_path}")
         print(f"  Wrote val: {val_path}")
     else:
