@@ -38,20 +38,23 @@ cd "$PROJECT_DIR"
 export TOKENIZERS_PARALLELISM=false
 export WANDB_PROJECT="${WANDB_PROJECT:-infilling}"
 export WANDB_ROOT="${WANDB_ROOT:-/groups/tensorlab/myang2/.wandb}"
-export WANDB_DIR="${WANDB_DIR:-$WANDB_ROOT/runs}"
-export WANDB_DATA_DIR="${WANDB_DATA_DIR:-$WANDB_ROOT/data}"
-export WANDB_CACHE_DIR="${WANDB_CACHE_DIR:-$WANDB_ROOT/cache}"
-export WANDB_ARTIFACT_DIR="${WANDB_ARTIFACT_DIR:-$WANDB_ROOT/artifacts}"
+export WANDB_DIR="$WANDB_ROOT/runs"
+export WANDB_DATA_DIR="$WANDB_ROOT/data"
+export WANDB_CACHE_DIR="$WANDB_ROOT/cache"
+export WANDB_ARTIFACT_DIR="$WANDB_ROOT/artifacts"
 export UV_CACHE_DIR="${UV_CACHE_DIR:-/groups/tensorlab/myang2/.cache/uv}"
 # Ensure local package imports (e.g., lean_dojo_v2.*) resolve in torchrun workers.
 export PYTHONPATH="$PROJECT_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
-mkdir -p \
+for path in \
   "$WANDB_DIR" \
   "$WANDB_DATA_DIR" \
   "$WANDB_CACHE_DIR" \
   "$WANDB_ARTIFACT_DIR" \
   "$UV_CACHE_DIR"
+do
+  command mkdir -p -- "$path"
+done
 
 echo "=============================================="
 echo "Job ID:        $SLURM_JOB_ID"
