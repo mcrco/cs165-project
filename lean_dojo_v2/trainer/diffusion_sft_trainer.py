@@ -10,7 +10,6 @@ import torch.nn.functional as F
 from datasets import Dataset
 from peft import LoraConfig, get_peft_model
 from transformers import (
-    AutoModelForCausalLM,
     AutoTokenizer,
     Trainer,
     TrainingArguments,
@@ -19,11 +18,15 @@ from transformers.trainer_callback import ProgressCallback
 
 from lean_dojo_v2.database import DynamicDatabase
 from lean_dojo_v2.diffusion import (
+    DEFAULT_DIFFUSION_MODEL_NAME,
     DEFAULT_DIFFUSION_STEPS,
     DEFAULT_DIFFUSION_TEMPERATURE,
     DEFAULT_REMASKING,
+    create_diffusion_training_objective,
     decode_until_stop,
     denoise_masked_sequence,
+    load_diffusion_components,
+    prepare_diffusion_forward_kwargs,
     resolve_mask_token_id,
 )
 from lean_dojo_v2.lean_dojo.data_extraction.lean import LeanGitRepo
@@ -221,9 +224,25 @@ class MdlmTrainer(Trainer):
     everything else for training MDLMs as well.
     """
 
+    def __init__(self, *args, training_objective=None, **kwargs):
+        self.training_objective = training_objective
+        super().__init__(*args, **kwargs)
+
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        if self.training_objective is not None:
+            return self.training_objective.compute_loss(
+                model,
+                inputs,
+                return_outputs=return_outputs,
+            )
         labels = inputs.pop("labels")
-        outputs = model(**inputs)
+        outputs = model(
+            **prepare_diffusion_forward_kwargs(
+                model=model,
+                input_ids=inputs["input_ids"],
+                attention_mask=inputs.get("attention_mask"),
+            )
+        )
         logits = outputs.logits
         vocab_size = logits.shape[-1]
         loss = F.cross_entropy(
@@ -244,7 +263,7 @@ class QuietProgressCallback(ProgressCallback):
 class DiffusionSFTTrainer:
     def __init__(
         self,
-        model_name: str = "inclusionAI/LLaDA-MoE-7B-A1B-Instruct",
+        model_name: str = DEFAULT_DIFFUSION_MODEL_NAME,
         output_dir: str = "outputs-diffusion-sft",
         epochs_per_repo: float = 1.0,
         batch_size: int = 1,
@@ -266,22 +285,21 @@ class DiffusionSFTTrainer:
         self.use_lora = lora_config is not None
         self.trust_remote_code = trust_remote_code
 
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            model_name, use_fast=True, trust_remote_code=self.trust_remote_code
-        )
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-
-        self.model = AutoModelForCausalLM.from_pretrained(
+        self.components = load_diffusion_components(
             model_name,
             torch_dtype=torch.bfloat16,
             trust_remote_code=self.trust_remote_code,
+            for_training=True,
         )
+        self.family = self.components.family
+        self.sampling_config = self.components.sampling
+        self.tokenizer = self.components.tokenizer
+        self.model = self.components.model
 
         if self.use_lora:
             self.model = self._apply_lora()
 
-        self.mask_token_id = resolve_mask_token_id(self.tokenizer)
+        self.mask_token_id = self.components.mask_token_id
 
         self.training_args = TrainingArguments(
             output_dir=output_dir,
@@ -296,12 +314,16 @@ class DiffusionSFTTrainer:
             logging_steps=10,
         )
 
-        self.data_collator = DiffusionDataCollator(
+        self.training_objective = create_diffusion_training_objective(
+            family=self.family,
+            mode="sft",
             tokenizer=self.tokenizer,
             mask_token_id=self.mask_token_id,
             min_mask_ratio=min_mask_ratio,
             max_mask_ratio=max_mask_ratio,
+            pad_token_id=self.tokenizer.pad_token_id,
         )
+        self.data_collator = self.training_objective
 
     def _apply_lora(self):
         if self.lora_config is None:
@@ -318,6 +340,7 @@ class DiffusionSFTTrainer:
             train_dataset=train_dataset,
             data_collator=self.data_collator,
             tokenizer=self.tokenizer,
+            training_objective=self.training_objective,
         )
 
     def train(
@@ -357,9 +380,9 @@ class DiffusionSFTTrainer:
         goal_state: str,
         *,
         num_return_sequences: int = 1,
-        steps: int = DEFAULT_DIFFUSION_STEPS,
-        temperature: float = DEFAULT_DIFFUSION_TEMPERATURE,
-        remasking: str = DEFAULT_REMASKING,
+        steps: Optional[int] = None,
+        temperature: Optional[float] = None,
+        remasking: Optional[str] = None,
     ) -> List[str]:
         """Iteratively denoise a masked generation span for next-tactic prediction."""
         messages = [
@@ -391,15 +414,22 @@ class DiffusionSFTTrainer:
         )
         x[:, : prompt_ids.shape[1]] = prompt_ids
         attention_mask = torch.ones_like(x)
+        effective_steps = self.sampling_config.steps if steps is None else max(1, int(steps))
+        effective_temperature = (
+            self.sampling_config.temperature
+            if temperature is None
+            else float(temperature)
+        )
+        effective_remasking = self.sampling_config.remasking if remasking is None else remasking
 
         sampled = denoise_masked_sequence(
             model=self.model,
             input_ids=x,
             attention_mask=attention_mask,
             mask_token_id=self.mask_token_id,
-            steps=steps,
-            temperature=temperature,
-            remasking=remasking,
+            steps=effective_steps,
+            temperature=effective_temperature,
+            remasking=effective_remasking,
         )
 
         generated_only = sampled[:, prompt_ids.shape[1] :].tolist()

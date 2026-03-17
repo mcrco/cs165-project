@@ -26,6 +26,8 @@ from typing import Any
 
 import modal
 
+from lean_dojo_v2.diffusion import DEFAULT_DIFFUSION_MODEL_NAME
+
 # ---------------------------------------------------------------------------
 # Modal App Configuration
 # ---------------------------------------------------------------------------
@@ -318,7 +320,7 @@ class ProofSearchWorker:
 def main(
     data_json: str = "datasets/april/leandojo/test/thme_test.json",
     model_type: str = "diffusion",
-    ckpt: str = "inclusionAI/LLaDA-MoE-7B-A1B-Instruct",
+    ckpt: str = DEFAULT_DIFFUSION_MODEL_NAME,
     device: str = "auto",
     use_lora: bool = False,
     imports: str = "Init,Mathlib",

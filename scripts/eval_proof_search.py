@@ -77,7 +77,7 @@ def extract_goal_from_item(item: dict[str, Any]) -> str:
 
 def build_prover(model_type: str, ckpt: str, device: str, use_lora: bool):
     if model_type == "diffusion":
-        return DiffusionProver(ckpt_path=ckpt, device=device)
+        return DiffusionProver(ckpt_path=ckpt, use_lora=use_lora, device=device)
     if model_type == "hf":
         return HFProver(ckpt_path=ckpt, use_lora=use_lora, device=device)
     raise ValueError(f"Unsupported model_type: {model_type}")

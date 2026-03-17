@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Optional
 
+from lean_dojo_v2.diffusion import DEFAULT_DIFFUSION_MODEL_NAME
 from lean_dojo_v2.lean_agent.config import ProverConfig, TrainingConfig
 from lean_dojo_v2.prover import DiffusionProver
 from lean_dojo_v2.trainer import DiffusionSFTTrainer
@@ -12,7 +13,7 @@ class DiffusionAgent(BaseAgent):
     def __init__(
         self,
         trainer: Optional[DiffusionSFTTrainer] = None,
-        prover_ckpt_path: str = "inclusionAI/LLaDA-MoE-7B-A1B-Instruct",
+        prover_ckpt_path: str = DEFAULT_DIFFUSION_MODEL_NAME,
         database_path: str = "dynamic_database.json",
         training_config: Optional[TrainingConfig] = None,
         prover_config: Optional[ProverConfig] = None,

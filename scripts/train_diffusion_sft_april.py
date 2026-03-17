@@ -24,13 +24,17 @@ from typing import Any
 import torch
 from datasets import Dataset
 from peft import LoraConfig, get_peft_model
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback, TrainingArguments
+from transformers import TrainerCallback, TrainingArguments
 
-from lean_dojo_v2.diffusion import resolve_mask_token_id
+from lean_dojo_v2.diffusion import (
+    DEFAULT_DIFFUSION_MODEL_NAME,
+    create_diffusion_training_objective,
+    load_diffusion_components,
+)
 from lean_dojo_v2.trainer.diffusion_sft_trainer import (
-    DiffusionDataCollator,
     DiffusionSFTDataset,
     MdlmTrainer,
+    _ensure_prepare_inputs_for_generation,
 )
 
 
@@ -106,7 +110,7 @@ def main() -> None:
     parser.add_argument(
         "--model-name",
         type=str,
-        default="inclusionAI/LLaDA-MoE-7B-A1B-Instruct",
+        default=DEFAULT_DIFFUSION_MODEL_NAME,
     )
     parser.add_argument("--epochs", type=float, default=3.0)
     parser.add_argument("--batch-size", type=int, default=1)
@@ -161,24 +165,24 @@ def main() -> None:
     # -- Load tokenizer and model --
     print("\n[2/5] Loading tokenizer and model...")
     t0 = time.time()
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    model = AutoModelForCausalLM.from_pretrained(
+    components = load_diffusion_components(
         args.model_name,
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
+        for_training=True,
     )
+    tokenizer = components.tokenizer
+    model = components.model
     print(f"  Model loaded in {time.time() - t0:.1f}s")
 
-    mask_token_id = resolve_mask_token_id(tokenizer)
+    mask_token_id = components.mask_token_id
 
     if args.gradient_checkpointing:
         model.enable_input_require_grads()
 
     if args.use_lora:
         print("\n[2.5/5] Applying LoRA...")
+        _ensure_prepare_inputs_for_generation(model)
         lora_config = LoraConfig(
             r=args.lora_r,
             lora_alpha=args.lora_alpha,
@@ -223,20 +227,24 @@ def main() -> None:
         save_total_limit=3,
     )
 
-    data_collator = DiffusionDataCollator(
+    training_objective = create_diffusion_training_objective(
+        family=components.family,
+        mode="sft",
         tokenizer=tokenizer,
         mask_token_id=mask_token_id,
         min_mask_ratio=args.min_mask_ratio,
         max_mask_ratio=args.max_mask_ratio,
+        pad_token_id=tokenizer.pad_token_id,
     )
 
     trainer = MdlmTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        data_collator=data_collator,
+        data_collator=training_objective,
         tokenizer=tokenizer,
         callbacks=[LossPrinterCallback()],
+        training_objective=training_objective,
     )
 
     # -- Train --

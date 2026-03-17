@@ -5,34 +5,19 @@ from typing import Optional
 
 import torch
 from pantograph.expr import GoalState, Tactic
-from peft import AutoPeftModelForCausalLM
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from lean_dojo_v2.database.models.theorems import Theorem
 from lean_dojo_v2.diffusion import (
     DEFAULT_DIFFUSION_STEPS,
     DEFAULT_DIFFUSION_TEMPERATURE,
+    DEFAULT_LLADA_MODEL_NAME,
     DEFAULT_REMASKING,
     decode_until_stop,
+    denoise_masked_sequence,
     generate_llada_blockwise,
-    resolve_mask_token_id,
+    load_diffusion_components,
 )
 from lean_dojo_v2.prover.base_prover import BaseProver
-
-
-def _sanitize_rope_scaling(cfg):
-    rope = getattr(cfg, "rope_scaling", None)
-    if not isinstance(rope, dict):
-        return cfg
-    rope = dict(rope)
-    for key in ("factor", "beta_fast", "beta_slow"):
-        if key in rope and rope[key] is not None:
-            try:
-                rope[key] = float(rope[key])
-            except (TypeError, ValueError):
-                pass
-    cfg.rope_scaling = rope
-    return cfg
 
 
 class DiffusionProver(BaseProver):
@@ -40,7 +25,7 @@ class DiffusionProver(BaseProver):
 
     def __init__(
         self,
-        ckpt_path: str = "inclusionAI/LLaDA-MoE-7B-A1B-Instruct",
+        ckpt_path: str = DEFAULT_LLADA_MODEL_NAME,
         use_lora: bool = False,
         device: str = "auto",
     ):
@@ -50,23 +35,18 @@ class DiffusionProver(BaseProver):
         else:
             self.device = torch.device(device)
 
-        trust_remote_code = ckpt_path == "inclusionAI/LLaDA-MoE-7B-A1B-Instruct"
-        config = _sanitize_rope_scaling(
-            AutoConfig.from_pretrained(ckpt_path, trust_remote_code=trust_remote_code)
+        self.components = load_diffusion_components(
+            ckpt_path,
+            torch_dtype=torch.bfloat16 if self.device.type == "cuda" else torch.float32,
+            device=self.device,
+            trust_remote_code=True,
+            use_lora_adapter=use_lora,
         )
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            ckpt_path, trust_remote_code=trust_remote_code
-        )
-
-        if use_lora:
-            self.model = AutoPeftModelForCausalLM.from_pretrained(
-                ckpt_path, config=config, trust_remote_code=trust_remote_code
-            ).to(self.device)
-        else:
-            self.model = AutoModelForCausalLM.from_pretrained(
-                ckpt_path, config=config, trust_remote_code=trust_remote_code
-            ).to(self.device)
-        self.mask_token_id = resolve_mask_token_id(self.tokenizer)
+        self.family = self.components.family
+        self.sampling_config = self.components.sampling
+        self.tokenizer = self.components.tokenizer
+        self.model = self.components.model
+        self.mask_token_id = self.components.mask_token_id
 
         self.model.eval()
 
@@ -96,11 +76,11 @@ class DiffusionProver(BaseProver):
                 prompt=prompt,
                 gen_length=64,
                 num_return_sequences=5,
-                steps=DEFAULT_DIFFUSION_STEPS,
+                steps=self.sampling_config.steps,
                 block_length=64,
-                temperature=DEFAULT_DIFFUSION_TEMPERATURE,
+                temperature=self.sampling_config.temperature,
                 cfg_scale=0.0,
-                remasking=DEFAULT_REMASKING,
+                remasking=self.sampling_config.remasking,
             )
 
         tactics = []
@@ -132,11 +112,11 @@ class DiffusionProver(BaseProver):
                 prompt=prompt,
                 gen_length=512,
                 num_return_sequences=1,
-                steps=DEFAULT_DIFFUSION_STEPS,
+                steps=self.sampling_config.steps,
                 block_length=128,
-                temperature=DEFAULT_DIFFUSION_TEMPERATURE,
+                temperature=self.sampling_config.temperature,
                 cfg_scale=0.0,
-                remasking=DEFAULT_REMASKING,
+                remasking=self.sampling_config.remasking,
             )
 
         if not proofs:
@@ -172,19 +152,41 @@ class DiffusionProver(BaseProver):
     ) -> list[str]:
         encoded = self.tokenizer(prompt, return_tensors="pt")
         prompt_ids = encoded.input_ids.to(self.device).repeat(num_return_sequences, 1)
-
-        sampled_ids = generate_llada_blockwise(
-            model=self.model,
-            prompt=prompt_ids,
-            steps=steps,
-            gen_length=gen_length,
-            block_length=block_length,
-            temperature=temperature,
-            cfg_scale=cfg_scale,
-            remasking=remasking,
-            mask_id=self.mask_token_id,
-        )
-        generated_only = sampled_ids[:, prompt_ids.shape[1] :]
+        if self.family == "llada":
+            sampled_ids = generate_llada_blockwise(
+                model=self.model,
+                prompt=prompt_ids,
+                attention_mask=encoded.attention_mask.to(self.device).repeat(
+                    num_return_sequences, 1
+                ),
+                steps=steps,
+                gen_length=gen_length,
+                block_length=block_length,
+                temperature=temperature,
+                cfg_scale=cfg_scale,
+                remasking=remasking,
+                mask_id=self.mask_token_id,
+            )
+            generated_only = sampled_ids[:, prompt_ids.shape[1] :]
+        else:
+            x = torch.full(
+                (num_return_sequences, prompt_ids.shape[1] + gen_length),
+                self.mask_token_id,
+                dtype=torch.long,
+                device=self.device,
+            )
+            x[:, : prompt_ids.shape[1]] = prompt_ids
+            attention_mask = torch.ones_like(x)
+            sampled_ids = denoise_masked_sequence(
+                model=self.model,
+                input_ids=x,
+                attention_mask=attention_mask,
+                mask_token_id=self.mask_token_id,
+                steps=steps,
+                temperature=temperature,
+                remasking=remasking,
+            )
+            generated_only = sampled_ids[:, prompt_ids.shape[1] :]
 
         return [
             decode_until_stop(self.tokenizer, seq.tolist(), self.mask_token_id)

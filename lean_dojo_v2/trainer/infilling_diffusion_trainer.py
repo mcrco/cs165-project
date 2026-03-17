@@ -12,21 +12,21 @@ from datasets import Dataset
 from peft import LoraConfig, get_peft_model
 from tqdm.auto import tqdm
 from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
     TrainerCallback,
     TrainingArguments,
 )
 from transformers.trainer_callback import PrinterCallback, ProgressCallback
 
 from lean_dojo_v2.diffusion import (
+    create_diffusion_training_objective,
+    DEFAULT_DIFFUSION_MODEL_NAME,
     DEFAULT_DIFFUSION_STEPS,
     DEFAULT_DIFFUSION_TEMPERATURE,
-    DEFAULT_LLADA_MODEL_NAME,
     DEFAULT_REMASKING,
     decode_until_stop,
     denoise_masked_sequence,
     get_diffusion_sampling_config,
+    load_diffusion_components,
     resolve_mask_token_id,
 )
 from .diffusion_sft_trainer import (
@@ -798,7 +798,7 @@ class InfillingDiffusionTrainer:
 
     def __init__(
         self,
-        model_name: str = DEFAULT_LLADA_MODEL_NAME,
+        model_name: str = DEFAULT_DIFFUSION_MODEL_NAME,
         train_path: str = "",
         val_path: Optional[str] = None,
         output_dir: str = "outputs/infilling-mdm",
@@ -861,25 +861,30 @@ class InfillingDiffusionTrainer:
             bf16 = torch.cuda.is_available()
         self.bf16 = bf16
 
-        # Load tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            model_name, use_fast=True, trust_remote_code=self.trust_remote_code
-        )
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-
-        # Load model
-        self.model = AutoModelForCausalLM.from_pretrained(
+        self.components = load_diffusion_components(
             model_name,
             torch_dtype=torch.bfloat16 if self.bf16 else torch.float32,
             trust_remote_code=self.trust_remote_code,
+            for_training=True,
         )
+        self.family = self.components.family
+        self.tokenizer = self.components.tokenizer
+        self.model = self.components.model
 
         if self.use_lora:
             self.model = self._apply_lora()
 
         # Get mask token ID
-        self.mask_token_id = resolve_mask_token_id(self.tokenizer)
+        self.mask_token_id = self.components.mask_token_id
+        self.training_objective = create_diffusion_training_objective(
+            family=self.family,
+            mode="infilling",
+            tokenizer=self.tokenizer,
+            mask_token_id=self.mask_token_id,
+            min_mask_ratio=self.min_mask_ratio,
+            max_mask_ratio=self.max_mask_ratio,
+            pad_token_id=self.tokenizer.pad_token_id,
+        )
 
         # Setup training arguments
         eval_strategy = "epoch" if val_path else "no"
@@ -1087,13 +1092,7 @@ class InfillingDiffusionTrainer:
             print(f"Loaded {len(eval_dataset)} validation examples")
 
         # Create collator
-        data_collator = InfillingMDMCollator(
-            tokenizer=self.tokenizer,
-            mask_token_id=self.mask_token_id,
-            pad_token_id=self.tokenizer.pad_token_id,
-            min_mask_ratio=self.min_mask_ratio,
-            max_mask_ratio=self.max_mask_ratio,
-        )
+        data_collator = self.training_objective
 
         callbacks = []
         if self.wandb_enabled and wandb_module is not None:
@@ -1119,6 +1118,7 @@ class InfillingDiffusionTrainer:
             data_collator=data_collator,
             tokenizer=self.tokenizer,
             callbacks=callbacks,
+            training_objective=self.training_objective,
         )
         # Keep tqdm with dummy quiet callback but suppress raw metric-dict prints from HF callbacks.
         trainer.remove_callback(PrinterCallback)

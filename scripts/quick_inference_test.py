@@ -1,24 +1,26 @@
 """Quick inference sanity check: does the fine-tuned diffusion model produce anything sensible?"""
 import json
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from peft import PeftModel
 
-from lean_dojo_v2.diffusion import resolve_mask_token_id
+from lean_dojo_v2.diffusion import (
+    generate_llada_blockwise,
+    load_diffusion_components,
+)
 
 CKPT = "/resnick/scratch/tram/cs165-project/outputs-diffusion-sft"
 BASE = "inclusionAI/LLaDA-MoE-7B-A1B-Instruct"
 
 print("Loading tokenizer...")
-tokenizer = AutoTokenizer.from_pretrained(CKPT)
+components = load_diffusion_components(
+    CKPT,
+    torch_dtype=torch.bfloat16,
+    trust_remote_code=True,
+    use_lora_adapter=True,
+)
+tokenizer = components.tokenizer
 
 print("Loading base model on GPU...")
-base_model = AutoModelForCausalLM.from_pretrained(
-    BASE, torch_dtype=torch.bfloat16, trust_remote_code=True,
-    device_map="auto"
-)
-print("Loading LoRA adapter...")
-model = PeftModel.from_pretrained(base_model, CKPT)
+model = components.model
 model.eval()
 print("Model loaded!\n")
 
@@ -45,7 +47,7 @@ for f in test_files:
     if len(test_cases) >= 10:
         break
 
-mask_id = resolve_mask_token_id(tokenizer)
+mask_id = components.mask_token_id
 
 print("=" * 80)
 print("INFERENCE TEST: Fine-tuned diffusion model on APRIL test examples")
@@ -69,40 +71,17 @@ for i, tc in enumerate(test_cases):
     prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
     prompt_ids = tokenizer(prompt, return_tensors="pt", add_special_tokens=False)["input_ids"].cuda()
 
-    gen_length = 64
-    x = torch.full((1, prompt_ids.shape[1] + gen_length), mask_id, dtype=torch.long, device="cuda")
-    x[:, :prompt_ids.shape[1]] = prompt_ids
-
-    # Iterative denoising: 32 steps (lighter version of the full 128-step schedule)
-    num_steps = 32
-    mask_positions_orig = (x == mask_id)
-    num_masked = mask_positions_orig.sum().item()
-
-    for step in range(num_steps):
-        with torch.no_grad():
-            logits = model(x).logits
-
-        still_masked = (x == mask_id)
-        if not still_masked.any():
-            break
-
-        probs = torch.softmax(logits, dim=-1)
-        confidence = probs.max(dim=-1).values
-        confidence[~still_masked] = float('inf')
-
-        n_to_unmask = max(1, int(num_masked * (1.0 / num_steps)))
-        if step == num_steps - 1:
-            n_to_unmask = still_masked.sum().item()
-
-        flat_conf = confidence.view(-1)
-        flat_mask = still_masked.view(-1)
-        flat_conf[~flat_mask] = float('inf')
-
-        _, indices = flat_conf.topk(min(n_to_unmask, flat_mask.sum().item()), largest=False)
-        predicted = torch.argmax(logits.view(-1, logits.size(-1)), dim=-1)
-        x.view(-1)[indices] = predicted[indices]
-
-    generated = x[:, prompt_ids.shape[1]:]
+    generated = generate_llada_blockwise(
+        model=model,
+        prompt=prompt_ids,
+        steps=32,
+        gen_length=64,
+        block_length=64,
+        temperature=0.0,
+        cfg_scale=0.0,
+        remasking="low_confidence",
+        mask_id=mask_id,
+    )[:, prompt_ids.shape[1]:]
     output = tokenizer.decode(generated[0], skip_special_tokens=True).strip().split("\n")[0].strip()
     expected = tc["expected"].strip()
 
@@ -127,10 +106,11 @@ print("=" * 80)
 
 # Also compare to base model (no LoRA) for reference
 print("\n\nNow testing BASE MODEL (no fine-tuning) for comparison...")
-base_only = AutoModelForCausalLM.from_pretrained(
-    BASE, torch_dtype=torch.bfloat16, trust_remote_code=True,
-    device_map="auto"
-)
+base_only = load_diffusion_components(
+    BASE,
+    torch_dtype=torch.bfloat16,
+    trust_remote_code=True,
+).model
 base_only.eval()
 
 base_exact = 0
@@ -150,39 +130,17 @@ for i, tc in enumerate(test_cases[:5]):
     prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
     prompt_ids = tokenizer(prompt, return_tensors="pt", add_special_tokens=False)["input_ids"].cuda()
 
-    gen_length = 64
-    x = torch.full((1, prompt_ids.shape[1] + gen_length), mask_id, dtype=torch.long, device="cuda")
-    x[:, :prompt_ids.shape[1]] = prompt_ids
-
-    num_steps = 32
-    mask_positions_orig = (x == mask_id)
-    num_masked = mask_positions_orig.sum().item()
-
-    for step in range(num_steps):
-        with torch.no_grad():
-            logits = base_only(x).logits
-
-        still_masked = (x == mask_id)
-        if not still_masked.any():
-            break
-
-        probs = torch.softmax(logits, dim=-1)
-        confidence = probs.max(dim=-1).values
-        confidence[~still_masked] = float('inf')
-
-        n_to_unmask = max(1, int(num_masked * (1.0 / num_steps)))
-        if step == num_steps - 1:
-            n_to_unmask = still_masked.sum().item()
-
-        flat_conf = confidence.view(-1)
-        flat_mask = still_masked.view(-1)
-        flat_conf[~flat_mask] = float('inf')
-
-        _, indices = flat_conf.topk(min(n_to_unmask, flat_mask.sum().item()), largest=False)
-        predicted = torch.argmax(logits.view(-1, logits.size(-1)), dim=-1)
-        x.view(-1)[indices] = predicted[indices]
-
-    generated = x[:, prompt_ids.shape[1]:]
+    generated = generate_llada_blockwise(
+        model=base_only,
+        prompt=prompt_ids,
+        steps=32,
+        gen_length=64,
+        block_length=64,
+        temperature=0.0,
+        cfg_scale=0.0,
+        remasking="low_confidence",
+        mask_id=mask_id,
+    )[:, prompt_ids.shape[1]:]
     output = tokenizer.decode(generated[0], skip_special_tokens=True).strip().split("\n")[0].strip()
     expected = tc["expected"].strip()
 

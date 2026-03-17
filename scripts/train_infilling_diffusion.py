@@ -13,7 +13,7 @@ from typing import Optional
 import torch
 from peft import LoraConfig, TaskType
 
-from lean_dojo_v2.diffusion import DEFAULT_LLADA_MODEL_NAME
+from lean_dojo_v2.diffusion import DEFAULT_DIFFUSION_MODEL_NAME
 from lean_dojo_v2.trainer.infilling_diffusion_trainer import InfillingDiffusionTrainer
 
 
@@ -54,7 +54,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--model-name",
-        default=DEFAULT_LLADA_MODEL_NAME,
+        default=DEFAULT_DIFFUSION_MODEL_NAME,
         help="HF model identifier to fine-tune.",
     )
     parser.add_argument(
@@ -120,7 +120,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--wandb-run-name",
-        default="infilling-mdm-8b-april",
+        default="infilling-mdm-dream7b-april",
         help="Weights & Biases run name.",
     )
     parser.add_argument(
