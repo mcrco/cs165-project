@@ -18,8 +18,7 @@ PROJECT_DIR=""
 for candidate in \
   "${REPO_DIR:-}" \
   "${SLURM_SUBMIT_DIR:-}" \
-  "/resnick/groups/tensorlab/myang2/cs165-project" \
-  "/groups/tensorlab/myang2/cs165-project"
+  "/resnick/groups/tensorlab/myang2/cs165-project"
 do
   if [[ -n "$candidate" && -f "$candidate/scripts/train_infilling_diffusion.py" ]]; then
     PROJECT_DIR="$candidate"
@@ -72,7 +71,7 @@ echo "Launching $NPROC_PER_NODE process(es) on this node."
 
 if [[ "$NPROC_PER_NODE" -gt 1 ]]; then
   srun --cpu-bind=none \
-    uv run torchrun --standalone --nnodes=1 --nproc_per_node="$NPROC_PER_NODE" \
+    uv run python -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node="$NPROC_PER_NODE" \
     scripts/train_infilling_diffusion.py "$@"
 else
   srun --cpu-bind=none "${CMD[@]}"
