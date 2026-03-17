@@ -46,16 +46,6 @@ export UV_CACHE_DIR="${UV_CACHE_DIR:-/groups/tensorlab/myang2/.cache/uv}"
 # Ensure local package imports (e.g., lean_dojo_v2.*) resolve in torchrun workers.
 export PYTHONPATH="$PROJECT_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
-for path in \
-  "$WANDB_DIR" \
-  "$WANDB_DATA_DIR" \
-  "$WANDB_CACHE_DIR" \
-  "$WANDB_ARTIFACT_DIR" \
-  "$UV_CACHE_DIR"
-do
-  command mkdir -p -- "$path"
-done
-
 echo "=============================================="
 echo "Job ID:        $SLURM_JOB_ID"
 echo "Node:          $(hostname)"
