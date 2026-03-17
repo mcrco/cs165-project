@@ -174,14 +174,14 @@ class DiffusionTrainingObjective:
             self.pad_token_id,
             dtype=torch.long,
         )
-        attention_mask = torch.zeros((batch_size, max_len), dtype=torch.long)
+        attention_mask = torch.zeros((batch_size, max_len), dtype=torch.bool)
         loss_mask = torch.zeros((batch_size, max_len), dtype=torch.bool)
 
         for i, feature in enumerate(features):
             ids = torch.tensor(feature["input_ids"], dtype=torch.long)
             seq_len = ids.size(0)
             input_ids[i, :seq_len] = ids
-            attention_mask[i, :seq_len] = 1
+            attention_mask[i, :seq_len] = True
 
             if self.mode == "sft":
                 assistant_start = int(feature["assistant_start"])

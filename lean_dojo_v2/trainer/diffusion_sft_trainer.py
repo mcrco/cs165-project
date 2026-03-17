@@ -25,6 +25,7 @@ from lean_dojo_v2.diffusion import (
     create_diffusion_training_objective,
     decode_until_stop,
     denoise_masked_sequence,
+    is_dream_model,
     load_diffusion_components,
     prepare_diffusion_forward_kwargs,
     resolve_mask_token_id,
@@ -227,6 +228,13 @@ class MdlmTrainer(Trainer):
     def __init__(self, *args, training_objective=None, **kwargs):
         self.training_objective = training_objective
         super().__init__(*args, **kwargs)
+
+    def _prepare_inputs(self, inputs):
+        inputs = super()._prepare_inputs(inputs)
+        attention_mask = inputs.get("attention_mask")
+        if attention_mask is not None and is_dream_model(self.model):
+            inputs["attention_mask"] = attention_mask.bool()
+        return inputs
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         if self.training_objective is not None:
