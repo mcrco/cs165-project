@@ -13,6 +13,7 @@ from typing import Optional
 import torch
 from peft import LoraConfig, TaskType
 
+from lean_dojo_v2.diffusion import DEFAULT_LLADA_MODEL_NAME
 from lean_dojo_v2.trainer.infilling_diffusion_trainer import InfillingDiffusionTrainer
 
 
@@ -53,7 +54,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--model-name",
-        default="inclusionAI/LLaDA-MoE-7B-A1B-Instruct",
+        default=DEFAULT_LLADA_MODEL_NAME,
         help="HF model identifier to fine-tune.",
     )
     parser.add_argument(
@@ -94,8 +95,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--qual-sampling-steps",
         type=int,
-        default=16,
-        help="Diffusion denoising steps for qualitative sample logging.",
+        default=None,
+        help=(
+            "Diffusion denoising steps for qualitative sample logging. "
+            "Defaults to the selected model family's reference sampler."
+        ),
     )
     parser.add_argument(
         "--max-train-examples",
@@ -116,7 +120,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--wandb-run-name",
-        default="infilling-mdm-7b-april",
+        default="infilling-mdm-8b-april",
         help="Weights & Biases run name.",
     )
     parser.add_argument(

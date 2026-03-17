@@ -22,9 +22,11 @@ from transformers.trainer_callback import PrinterCallback, ProgressCallback
 from lean_dojo_v2.diffusion import (
     DEFAULT_DIFFUSION_STEPS,
     DEFAULT_DIFFUSION_TEMPERATURE,
+    DEFAULT_LLADA_MODEL_NAME,
     DEFAULT_REMASKING,
     decode_until_stop,
     denoise_masked_sequence,
+    get_diffusion_sampling_config,
     resolve_mask_token_id,
 )
 from .diffusion_sft_trainer import (
@@ -796,7 +798,7 @@ class InfillingDiffusionTrainer:
 
     def __init__(
         self,
-        model_name: str = "inclusionAI/LLaDA-MoE-7B-A1B-Instruct",
+        model_name: str = DEFAULT_LLADA_MODEL_NAME,
         train_path: str = "",
         val_path: Optional[str] = None,
         output_dir: str = "outputs/infilling-mdm",
@@ -814,7 +816,7 @@ class InfillingDiffusionTrainer:
         wandb_project: Optional[str] = "infilling",
         wandb_run_name: Optional[str] = None,
         qual_num_samples_per_split: int = 64,
-        qual_sampling_steps: int = 16,
+        qual_sampling_steps: Optional[int] = None,
         max_train_examples: Optional[int] = None,
         max_val_examples: Optional[int] = None,
         trust_remote_code: bool = True,
@@ -837,10 +839,17 @@ class InfillingDiffusionTrainer:
         self.use_lora = lora_config is not None
         self.logging_steps = logging_steps
         self.save_strategy = save_strategy
+        self.sampling_config = get_diffusion_sampling_config(
+            model_name, mode="infilling"
+        )
         self.wandb_project = wandb_project
         self.wandb_run_name = wandb_run_name
         self.qual_num_samples_per_split = qual_num_samples_per_split
-        self.qual_sampling_steps = qual_sampling_steps
+        self.qual_sampling_steps = (
+            self.sampling_config.steps
+            if qual_sampling_steps is None
+            else max(1, int(qual_sampling_steps))
+        )
         self.max_train_examples = max_train_examples
         self.max_val_examples = max_val_examples
         self.wandb_enabled = bool(wandb_project)
@@ -994,9 +1003,9 @@ class InfillingDiffusionTrainer:
         *,
         theorem_statement: str = "",
         num_return_sequences: int = 1,
-        steps: int = DEFAULT_DIFFUSION_STEPS,
-        temperature: float = DEFAULT_DIFFUSION_TEMPERATURE,
-        remasking: str = DEFAULT_REMASKING,
+        steps: Optional[int] = None,
+        temperature: Optional[float] = None,
+        remasking: Optional[str] = None,
         hole_token: str = "<HOLE>",
     ) -> List[str]:
         """Iteratively denoise the infilling hole and decode predicted tactic text."""
@@ -1012,15 +1021,22 @@ class InfillingDiffusionTrainer:
         x = torch.tensor(input_ids, dtype=torch.long, device=self.model.device).unsqueeze(0)
         x = x.repeat(num_return_sequences, 1)
         attention_mask = torch.ones_like(x)
+        effective_steps = self.sampling_config.steps if steps is None else max(1, int(steps))
+        effective_temperature = (
+            self.sampling_config.temperature
+            if temperature is None
+            else float(temperature)
+        )
+        effective_remasking = self.sampling_config.remasking if remasking is None else remasking
 
         sampled = denoise_masked_sequence(
             model=self.model,
             input_ids=x,
             attention_mask=attention_mask,
             mask_token_id=self.mask_token_id,
-            steps=steps,
-            temperature=temperature,
-            remasking=remasking,
+            steps=effective_steps,
+            temperature=effective_temperature,
+            remasking=effective_remasking,
         )
 
         results: List[str] = []

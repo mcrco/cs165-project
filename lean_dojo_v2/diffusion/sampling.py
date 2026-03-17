@@ -1,11 +1,12 @@
 """Shared diffusion sampling utilities.
 
 This module centralizes the sampling loops used across trainer/prover code.
-The block-wise generator is directly adapted from LLaDA-MoE inference code.
+The block-wise generator is adapted from the official LLaDA inference code.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -15,10 +16,65 @@ import torch.nn.functional as F
 DEFAULT_DIFFUSION_STEPS = 8
 DEFAULT_DIFFUSION_TEMPERATURE = 0.0
 DEFAULT_REMASKING = "low_confidence"
+DEFAULT_LLADA_MODEL_NAME = "GSAI-ML/LLaDA-8B-Instruct"
+REFERENCE_LLADA_MOE_7B_A1B_STEPS = 128
+REFERENCE_LLADA_MOE_7B_A1B_BLOCK_LENGTH = 32
+REFERENCE_LLADA_8B_STEPS = 128
+REFERENCE_LLADA_8B_BLOCK_LENGTH = 32
+
+
+@dataclass(frozen=True)
+class DiffusionSamplingConfig:
+    steps: int = DEFAULT_DIFFUSION_STEPS
+    temperature: float = DEFAULT_DIFFUSION_TEMPERATURE
+    remasking: str = DEFAULT_REMASKING
+    block_length: int = 128
+    cfg_scale: float = 0.0
+
+
+def get_diffusion_sampling_config(
+    model_name: Optional[str],
+    *,
+    mode: str = "infilling",
+) -> DiffusionSamplingConfig:
+    """Return model-aware sampling defaults.
+
+    The Hugging Face `inclusionAI/LLaDA-MoE-7B-A1B-*` and
+    `GSAI-ML/LLaDA-8B-*` reference samplers both use 128 denoising steps,
+    low-confidence remasking, and block length 32 for blockwise generation.
+    We reuse those defaults when either model family is selected.
+    """
+    normalized = (model_name or "").strip().lower()
+    if mode not in {"infilling", "blockwise"}:
+        raise ValueError(f"Unsupported diffusion sampling mode: {mode}")
+
+    if normalized.startswith("inclusionai/llada-moe-7b-a1b"):
+        return DiffusionSamplingConfig(
+            steps=REFERENCE_LLADA_MOE_7B_A1B_STEPS,
+            temperature=0.0,
+            remasking="low_confidence",
+            block_length=REFERENCE_LLADA_MOE_7B_A1B_BLOCK_LENGTH,
+            cfg_scale=0.0,
+        )
+
+    if normalized.startswith("gsai-ml/llada-8b"):
+        return DiffusionSamplingConfig(
+            steps=REFERENCE_LLADA_8B_STEPS,
+            temperature=0.0,
+            remasking="low_confidence",
+            block_length=REFERENCE_LLADA_8B_BLOCK_LENGTH,
+            cfg_scale=0.0,
+        )
+
+    return DiffusionSamplingConfig()
 
 
 def resolve_mask_token_id(tokenizer, fallback_id: int = 156895) -> int:
     """Resolve the diffusion mask token id across tokenizer variants."""
+    mask_token_id = getattr(tokenizer, "mask_token_id", None)
+    if mask_token_id is not None and int(mask_token_id) >= 0:
+        return int(mask_token_id)
+
     candidates = []
     mask_token = getattr(tokenizer, "mask_token", None)
     if isinstance(mask_token, str) and mask_token:
@@ -84,6 +140,7 @@ def generate_llada_blockwise(
     *,
     model,
     prompt: torch.Tensor,
+    attention_mask: Optional[torch.Tensor] = None,
     steps: int = DEFAULT_DIFFUSION_STEPS,
     gen_length: int = 128,
     block_length: int = 128,
@@ -107,6 +164,18 @@ def generate_llada_blockwise(
         device=model.device,
     )
     x[:, : prompt.shape[1]] = prompt.clone()
+    if attention_mask is not None:
+        attention_mask = torch.cat(
+            [
+                attention_mask,
+                torch.ones(
+                    (batch_size, gen_length),
+                    dtype=attention_mask.dtype,
+                    device=attention_mask.device,
+                ),
+            ],
+            dim=-1,
+        )
     prompt_index = x != mask_id
 
     if gen_length % block_length != 0:
@@ -132,11 +201,15 @@ def generate_llada_blockwise(
                 un_x = x.clone()
                 un_x[prompt_index] = mask_id
                 x_ = torch.cat([x, un_x], dim=0)
-                logits = model(x_).logits
+                if attention_mask is not None:
+                    attention_mask_ = torch.cat([attention_mask, attention_mask], dim=0)
+                    logits = model(x_, attention_mask=attention_mask_).logits
+                else:
+                    logits = model(x_).logits
                 logits, un_logits = torch.chunk(logits, 2, dim=0)
                 logits = un_logits + (cfg_scale + 1) * (logits - un_logits)
             else:
-                logits = model(x).logits
+                logits = model(x, attention_mask=attention_mask).logits
 
             logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
             x0 = torch.argmax(logits_with_noise, dim=-1)
