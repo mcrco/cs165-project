@@ -64,6 +64,27 @@ def context_adaptive_reweight(seq_len: int, *, cart_p: float = 0.8) -> torch.Ten
     return res
 
 
+def _find_infilling_supervised_end(
+    span_ids: torch.Tensor,
+    *,
+    mask_start: int,
+    mask_end: int,
+    eos_token_id: Optional[int],
+    mask_token_id: int,
+) -> int:
+    """Supervise only the tactic tokens and the first EOS inside a fixed infilling span."""
+    effective_end = mask_end
+    if eos_token_id is not None:
+        eos_positions = (span_ids == eos_token_id).nonzero(as_tuple=False)
+        if eos_positions.numel() > 0:
+            return mask_start + int(eos_positions[0].item()) + 1
+
+    mask_positions = (span_ids == mask_token_id).nonzero(as_tuple=False)
+    if mask_positions.numel() > 0:
+        effective_end = mask_start + int(mask_positions[0].item())
+    return effective_end
+
+
 @dataclass
 class DiffusionTrainingObjective:
     family: str
@@ -136,14 +157,17 @@ class DiffusionTrainingObjective:
                     continue
                 mask_end = min(mask_end, seq_len)
                 span_ids = input_ids[i, mask_start:mask_end].clone()
-                span_positions = torch.arange(mask_start, mask_end, dtype=torch.long)
-                pad_positions = span_positions[span_ids == self.mask_token_id]
-                real_positions = span_positions[span_ids != self.mask_token_id]
-                if pad_positions.numel() > 0:
-                    labels[i, pad_positions] = input_ids[i, pad_positions]
-                    pad_positions = pad_positions.tolist()
-                else:
-                    pad_positions = []
+                supervised_end = _find_infilling_supervised_end(
+                    span_ids,
+                    mask_start=mask_start,
+                    mask_end=mask_end,
+                    eos_token_id=self.tokenizer.eos_token_id,
+                    mask_token_id=self.mask_token_id,
+                )
+                if supervised_end <= mask_start:
+                    continue
+                span_positions = torch.arange(mask_start, supervised_end, dtype=torch.long)
+                real_positions = span_positions
 
             if self.mode == "sft":
                 if not real_positions:
@@ -191,7 +215,17 @@ class DiffusionTrainingObjective:
                 mask_start = int(feature.get("mask_start", -1))
                 mask_end = int(feature.get("mask_end", -1))
                 if mask_start >= 0 and mask_end > mask_start:
-                    loss_mask[i, mask_start : min(mask_end, seq_len)] = True
+                    mask_end = min(mask_end, seq_len)
+                    span_ids = ids[mask_start:mask_end]
+                    supervised_end = _find_infilling_supervised_end(
+                        span_ids,
+                        mask_start=mask_start,
+                        mask_end=mask_end,
+                        eos_token_id=self.tokenizer.eos_token_id,
+                        mask_token_id=self.mask_token_id,
+                    )
+                    if supervised_end > mask_start:
+                        loss_mask[i, mask_start:supervised_end] = True
 
         return {
             "input_ids": input_ids,
