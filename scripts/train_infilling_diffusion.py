@@ -28,6 +28,13 @@ def _optional_positive_int(value: str) -> Optional[int]:
     return parsed
 
 
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("Value must be positive.")
+    return parsed
+
+
 def _mask_ratio(value: str) -> float:
     parsed = float(value)
     if not (0.0 < parsed <= 1.0):
@@ -91,6 +98,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--logging-steps", type=int, default=10)
     parser.add_argument("--save-strategy", default="epoch")
+    parser.add_argument(
+        "--eval-every-n-epochs",
+        type=_positive_int,
+        default=10,
+        help=(
+            "Run validation once every N training epochs when validation is enabled. "
+            "Use 1 to evaluate every epoch."
+        ),
+    )
     parser.add_argument("--qual-num-samples-per-split", type=int, default=64)
     parser.add_argument(
         "--qual-sampling-steps",
@@ -158,7 +174,9 @@ def main() -> None:
     _set_local_cuda_device()
     if args.min_mask_ratio > args.max_mask_ratio:
         raise ValueError("--min-mask-ratio must be <= --max-mask-ratio.")
-    output_dir = args.output_dir or str(Path("outputs") / _safe_dir_component(args.wandb_run_name))
+    output_dir = args.output_dir or str(
+        Path("outputs") / _safe_dir_component(args.wandb_run_name)
+    )
 
     train_path = Path(args.train_path)
     val_path = Path(args.val_path)
@@ -191,6 +209,7 @@ def main() -> None:
         bf16=args.bf16,
         logging_steps=args.logging_steps,
         save_strategy=args.save_strategy,
+        eval_every_n_epochs=args.eval_every_n_epochs,
         wandb_project=args.wandb_project,
         wandb_run_name=args.wandb_run_name,
         qual_num_samples_per_split=args.qual_num_samples_per_split,

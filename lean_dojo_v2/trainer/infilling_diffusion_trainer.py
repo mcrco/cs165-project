@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
-from datasets import Dataset
 from peft import LoraConfig, get_peft_model
 from tqdm.auto import tqdm
 from transformers import (
@@ -17,18 +16,20 @@ from transformers import (
 )
 from transformers.trainer_callback import PrinterCallback, ProgressCallback
 
+from datasets import Dataset
 from lean_dojo_v2.diffusion import (
-    create_diffusion_training_objective,
     DEFAULT_DIFFUSION_MODEL_NAME,
     DEFAULT_DIFFUSION_STEPS,
     DEFAULT_DIFFUSION_TEMPERATURE,
     DEFAULT_REMASKING,
+    create_diffusion_training_objective,
     decode_until_stop,
     denoise_masked_sequence,
     get_diffusion_sampling_config,
     load_diffusion_components,
     resolve_mask_token_id,
 )
+
 from .diffusion_sft_trainer import (
     MdlmTrainer,
     QuietProgressCallback,
@@ -116,7 +117,9 @@ def _build_infilling_user_content(theorem_statement: str) -> str:
     return "\n\n".join(chunks)
 
 
-def _build_infilling_prompt_prefix(tokenizer, theorem_statement: str) -> Tuple[str, str]:
+def _build_infilling_prompt_prefix(
+    tokenizer, theorem_statement: str
+) -> Tuple[str, str]:
     user_content = _build_infilling_user_content(theorem_statement)
     messages = [
         {
@@ -170,7 +173,9 @@ def _iter_records_json_or_jsonl(data_path: str) -> Iterable[Dict[str, Any]]:
     if isinstance(loaded, dict):
         yield loaded
         return
-    raise ValueError(f"Unsupported dataset payload in {data_path}: {type(loaded).__name__}")
+    raise ValueError(
+        f"Unsupported dataset payload in {data_path}: {type(loaded).__name__}"
+    )
 
 
 class InfillingMDMDataset:
@@ -217,7 +222,9 @@ class InfillingMDMDataset:
             infilling = item.get("infilling", {})
             proof_with_hole = infilling.get("proof_with_hole", "")
             target_tactic = infilling.get("target_tactic", "").strip()
-            theorem_statement = _normalize_optional_text(item.get("theorem_statement", ""))
+            theorem_statement = _normalize_optional_text(
+                item.get("theorem_statement", "")
+            )
 
             if not proof_with_hole or not target_tactic or target_tactic == "sorry":
                 continue
@@ -259,7 +266,9 @@ class InfillingMDMDataset:
 
             total_proof_len = len(left_ids) + self.mask_span_length + len(right_ids)
             if total_proof_len > available_for_proof:
-                available_for_right = available_for_proof - len(left_ids) - self.mask_span_length
+                available_for_right = (
+                    available_for_proof - len(left_ids) - self.mask_span_length
+                )
                 if available_for_right < 0:
                     continue
                 right_ids = right_ids[:available_for_right]
@@ -315,7 +324,9 @@ class InfillingMDMCollator:
     ):
         self.tokenizer = tokenizer
         self.mask_token_id = mask_token_id
-        self.pad_token_id = pad_token_id if pad_token_id is not None else tokenizer.pad_token_id
+        self.pad_token_id = (
+            pad_token_id if pad_token_id is not None else tokenizer.pad_token_id
+        )
         if not (0.0 < min_mask_ratio <= max_mask_ratio <= 1.0):
             raise ValueError("Mask ratios must satisfy 0 < min <= max <= 1")
         self.min_mask_ratio = min_mask_ratio
@@ -335,7 +346,9 @@ class InfillingMDMCollator:
 
         for i, feature in enumerate(features):
             seq_len = len(feature["input_ids"])
-            input_ids[i, :seq_len] = torch.tensor(feature["input_ids"], dtype=torch.long)
+            input_ids[i, :seq_len] = torch.tensor(
+                feature["input_ids"], dtype=torch.long
+            )
             attention_mask[i, :seq_len] = 1
 
             mask_start = int(feature.get("mask_start", -1))
@@ -357,9 +370,15 @@ class InfillingMDMCollator:
                 labels[i, pad_positions] = input_ids[i, pad_positions]
 
             if real_positions.numel() > 0:
-                mask_ratio = torch.empty(1).uniform_(self.min_mask_ratio, self.max_mask_ratio).item()
+                mask_ratio = (
+                    torch.empty(1)
+                    .uniform_(self.min_mask_ratio, self.max_mask_ratio)
+                    .item()
+                )
                 num_to_mask = max(1, int(round(real_positions.numel() * mask_ratio)))
-                chosen = real_positions[torch.randperm(real_positions.numel())[:num_to_mask]]
+                chosen = real_positions[
+                    torch.randperm(real_positions.numel())[:num_to_mask]
+                ]
                 labels[i, chosen] = input_ids[i, chosen]
                 input_ids[i, chosen] = self.mask_token_id
 
@@ -412,7 +431,9 @@ class WandbQualitativeCallback(TrainerCallback):
 
         self.train_indices = self._sample_indices(train_dataset, seed)
         self.val_indices = (
-            self._sample_indices(eval_dataset, seed + 1) if eval_dataset is not None else []
+            self._sample_indices(eval_dataset, seed + 1)
+            if eval_dataset is not None
+            else []
         )
         self._qual_columns = [
             "split",
@@ -480,12 +501,16 @@ class WandbQualitativeCallback(TrainerCallback):
 
     def _predict_tactic(self, model, row: Dict[str, Any]) -> str:
         device = next(model.parameters()).device
-        input_ids = torch.tensor(row["input_ids"], dtype=torch.long, device=device).unsqueeze(0)
+        input_ids = torch.tensor(
+            row["input_ids"], dtype=torch.long, device=device
+        ).unsqueeze(0)
         attention_mask = torch.ones_like(input_ids)
         if "mask_start" in row and "mask_end" in row:
             mask_start = int(row["mask_start"])
             mask_end = int(row["mask_end"])
-            supervised_positions = list(range(mask_start, min(mask_end, input_ids.shape[1])))
+            supervised_positions = list(
+                range(mask_start, min(mask_end, input_ids.shape[1]))
+            )
             if not supervised_positions:
                 return ""
             masked_input = input_ids.clone()
@@ -535,7 +560,9 @@ class WandbQualitativeCallback(TrainerCallback):
             if "mask_start" in row and "mask_end" in row:
                 mask_start = int(row["mask_start"])
                 mask_end = int(row["mask_end"])
-                supervised_positions = list(range(mask_start, min(mask_end, len(input_ids))))
+                supervised_positions = list(
+                    range(mask_start, min(mask_end, len(input_ids)))
+                )
             elif "assistant_start" in row:
                 assistant_start = int(row["assistant_start"])
                 supervised_positions = list(range(assistant_start, len(input_ids)))
@@ -558,11 +585,15 @@ class WandbQualitativeCallback(TrainerCallback):
             dtype=torch.long,
             device=device,
         )
-        attention_mask = torch.zeros((batch_size, max_len), dtype=torch.long, device=device)
+        attention_mask = torch.zeros(
+            (batch_size, max_len), dtype=torch.long, device=device
+        )
 
         for batch_idx, (_row_idx, ids, _positions) in enumerate(batch_entries):
             seq_len = len(ids)
-            input_tensor[batch_idx, :seq_len] = torch.tensor(ids, dtype=torch.long, device=device)
+            input_tensor[batch_idx, :seq_len] = torch.tensor(
+                ids, dtype=torch.long, device=device
+            )
             attention_mask[batch_idx, :seq_len] = 1
 
         masked_input = input_tensor.clone()
@@ -601,9 +632,13 @@ class WandbQualitativeCallback(TrainerCallback):
         if dataset is None or not indices:
             return
 
-        history_rows = self.train_history_rows if split == "train" else self.val_history_rows
+        history_rows = (
+            self.train_history_rows if split == "train" else self.val_history_rows
+        )
         snapshot_table = (
-            self.wandb.Table(columns=self._qual_columns) if self.log_snapshot_table else None
+            self.wandb.Table(columns=self._qual_columns)
+            if self.log_snapshot_table
+            else None
         )
         num_examples = 0
         num_exact_matches = 0
@@ -613,7 +648,9 @@ class WandbQualitativeCallback(TrainerCallback):
             theorem_statement = row.get("theorem_statement", "")
             theorem = full_name.strip()
             if theorem_statement:
-                theorem = f"{theorem}: {theorem_statement}" if theorem else theorem_statement
+                theorem = (
+                    f"{theorem}: {theorem_statement}" if theorem else theorem_statement
+                )
 
             prompt = self._format_display_prompt(row)
             expected_tactic = row.get("target_tactic", "")
@@ -784,7 +821,9 @@ class WandbQualitativeCallback(TrainerCallback):
                     epoch=float(state.epoch) if state.epoch is not None else None,
                 )
         except Exception as exc:
-            print(f"[wandb] qualitative eval logging failed at step {state.global_step}: {exc}")
+            print(
+                f"[wandb] qualitative eval logging failed at step {state.global_step}: {exc}"
+            )
         finally:
             if was_training:
                 model.train()
@@ -813,6 +852,7 @@ class InfillingDiffusionTrainer:
         bf16: Optional[bool] = None,
         logging_steps: int = 10,
         save_strategy: str = "epoch",
+        eval_every_n_epochs: int = 1,
         wandb_project: Optional[str] = "infilling",
         wandb_run_name: Optional[str] = None,
         qual_num_samples_per_split: int = 64,
@@ -839,6 +879,9 @@ class InfillingDiffusionTrainer:
         self.use_lora = lora_config is not None
         self.logging_steps = logging_steps
         self.save_strategy = save_strategy
+        if eval_every_n_epochs <= 0:
+            raise ValueError("eval_every_n_epochs must be positive.")
+        self.eval_every_n_epochs = int(eval_every_n_epochs)
         self.sampling_config = get_diffusion_sampling_config(
             model_name, mode="infilling"
         )
@@ -888,6 +931,7 @@ class InfillingDiffusionTrainer:
 
         # Setup training arguments
         eval_strategy = "epoch" if val_path else "no"
+        load_best_model_at_end = bool(val_path) and self.eval_every_n_epochs == 1
         self.training_args = TrainingArguments(
             output_dir=output_dir,
             num_train_epochs=epochs,
@@ -897,12 +941,14 @@ class InfillingDiffusionTrainer:
             bf16=self.bf16,
             fp16=False,
             remove_unused_columns=False,
-            report_to=["wandb"] if self.wandb_enabled and self.is_main_process else "none",
+            report_to=["wandb"]
+            if self.wandb_enabled and self.is_main_process
+            else "none",
             save_strategy=save_strategy,
             eval_strategy=eval_strategy,
             logging_steps=logging_steps,
-            load_best_model_at_end=True if val_path else False,
-            metric_for_best_model="eval_loss" if val_path else None,
+            load_best_model_at_end=load_best_model_at_end,
+            metric_for_best_model="eval_loss" if load_best_model_at_end else None,
             run_name=wandb_run_name,
         )
 
@@ -928,7 +974,9 @@ class InfillingDiffusionTrainer:
                 trainable_tensors += 1
         return trainable_tensors
 
-    def _load_dataset(self, data_path: str, max_examples: Optional[int] = None) -> Dataset:
+    def _load_dataset(
+        self, data_path: str, max_examples: Optional[int] = None
+    ) -> Dataset:
         """Load and process dataset."""
         dataset = InfillingMDMDataset(
             data_path=data_path,
@@ -970,7 +1018,7 @@ class InfillingDiffusionTrainer:
         available_for_proof = self.max_length - len(prompt_ids)
 
         left_text = proof_with_hole[:hole_pos]
-        right_text = proof_with_hole[hole_pos + len(hole_token):]
+        right_text = proof_with_hole[hole_pos + len(hole_token) :]
         left_ids = self.tokenizer(
             left_text,
             add_special_tokens=False,
@@ -986,7 +1034,9 @@ class InfillingDiffusionTrainer:
 
         total_len = len(left_ids) + self.mask_span_length + len(right_ids)
         if total_len > available_for_proof:
-            available_for_right = available_for_proof - len(left_ids) - self.mask_span_length
+            available_for_right = (
+                available_for_proof - len(left_ids) - self.mask_span_length
+            )
             if available_for_right < 0:
                 return None
             right_ids = right_ids[:available_for_right]
@@ -1023,16 +1073,22 @@ class InfillingDiffusionTrainer:
             return []
         input_ids, _assistant_start, mask_start, mask_end = built
 
-        x = torch.tensor(input_ids, dtype=torch.long, device=self.model.device).unsqueeze(0)
+        x = torch.tensor(
+            input_ids, dtype=torch.long, device=self.model.device
+        ).unsqueeze(0)
         x = x.repeat(num_return_sequences, 1)
         attention_mask = torch.ones_like(x)
-        effective_steps = self.sampling_config.steps if steps is None else max(1, int(steps))
+        effective_steps = (
+            self.sampling_config.steps if steps is None else max(1, int(steps))
+        )
         effective_temperature = (
             self.sampling_config.temperature
             if temperature is None
             else float(temperature)
         )
-        effective_remasking = self.sampling_config.remasking if remasking is None else remasking
+        effective_remasking = (
+            self.sampling_config.remasking if remasking is None else remasking
+        )
 
         sampled = denoise_masked_sequence(
             model=self.model,
@@ -1047,7 +1103,9 @@ class InfillingDiffusionTrainer:
         results: List[str] = []
         for seq in sampled.tolist():
             predicted_span = seq[mask_start:mask_end]
-            results.append(decode_until_stop(self.tokenizer, predicted_span, self.mask_token_id))
+            results.append(
+                decode_until_stop(self.tokenizer, predicted_span, self.mask_token_id)
+            )
         return results
 
     def train(self):
@@ -1120,6 +1178,19 @@ class InfillingDiffusionTrainer:
             callbacks=callbacks,
             training_objective=self.training_objective,
         )
+        if eval_dataset is not None and self.eval_every_n_epochs > 1:
+            steps_per_epoch = max(1, len(trainer.get_train_dataloader()))
+            trainer.args.eval_strategy = "steps"
+            trainer.args.eval_steps = steps_per_epoch * self.eval_every_n_epochs
+            trainer.args.load_best_model_at_end = False
+            trainer.args.metric_for_best_model = None
+            if self.is_main_process:
+                effective_eval_epochs = trainer.args.eval_steps / steps_per_epoch
+                print(
+                    "Validation schedule: "
+                    f"every {trainer.args.eval_steps} optimizer steps "
+                    f"(about {effective_eval_epochs:g} epochs)"
+                )
         # Keep tqdm with dummy quiet callback but suppress raw metric-dict prints from HF callbacks.
         trainer.remove_callback(PrinterCallback)
         trainer.remove_callback(ProgressCallback)
