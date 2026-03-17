@@ -236,6 +236,31 @@ class MdlmTrainer(Trainer):
             inputs["attention_mask"] = attention_mask.bool()
         return inputs
 
+    def prediction_step(
+        self,
+        model,
+        inputs,
+        prediction_loss_only,
+        ignore_keys=None,
+    ):
+        if self.training_objective is None:
+            return super().prediction_step(
+                model,
+                inputs,
+                prediction_loss_only=prediction_loss_only,
+                ignore_keys=ignore_keys,
+            )
+
+        inputs = self._prepare_inputs(inputs)
+        with torch.no_grad():
+            with self.compute_loss_context_manager():
+                loss = self.compute_loss(model, inputs, return_outputs=False)
+
+        if isinstance(loss, tuple):
+            loss = loss[0]
+        loss = loss.detach().mean()
+        return (loss, None, None)
+
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         if self.training_objective is not None:
             return self.training_objective.compute_loss(
