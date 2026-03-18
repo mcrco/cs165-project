@@ -6,10 +6,32 @@ from typing import Optional
 
 import torch
 
-from .families import detect_diffusion_family, DIFFUSION_FAMILY_DREAM
+from .families import DIFFUSION_FAMILY_DREAM, detect_diffusion_family
+
+
+def _unwrap_model(model):
+    """Peel common training wrappers until we reach the underlying model."""
+    current = model
+    seen = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        config = getattr(current, "config", None)
+        model_type = str(getattr(config, "model_type", "")).strip().lower()
+        if model_type:
+            return current
+
+        for attr in ("module", "model", "base_model"):
+            wrapped = getattr(current, attr, None)
+            if wrapped is not None and wrapped is not current:
+                current = wrapped
+                break
+        else:
+            return current
+    return current
 
 
 def is_dream_model(model) -> bool:
+    model = _unwrap_model(model)
     config = getattr(model, "config", None)
     if config is None:
         return False
@@ -21,6 +43,7 @@ def is_dream_model(model) -> bool:
 
 
 def get_model_family(model) -> str:
+    model = _unwrap_model(model)
     if is_dream_model(model):
         return DIFFUSION_FAMILY_DREAM
     config = getattr(model, "config", None)
