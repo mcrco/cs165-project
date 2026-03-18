@@ -405,6 +405,7 @@ class WandbQualitativeCallback(TrainerCallback):
         sampling_temperature: float = DEFAULT_DIFFUSION_TEMPERATURE,
         sampling_remasking: str = DEFAULT_REMASKING,
         full_eval_batch_size: int = 8,
+        enable_full_exact_match_eval: bool = False,
         seed: int = 0,
         log_history_table: bool = True,
         log_snapshot_table: bool = False,
@@ -420,6 +421,7 @@ class WandbQualitativeCallback(TrainerCallback):
         self.sampling_temperature = float(sampling_temperature)
         self.sampling_remasking = sampling_remasking
         self.full_eval_batch_size = max(1, int(full_eval_batch_size))
+        self.enable_full_exact_match_eval = bool(enable_full_exact_match_eval)
         self.seed = seed
         self.log_history_table = bool(log_history_table)
         self.log_snapshot_table = bool(log_snapshot_table)
@@ -813,7 +815,10 @@ class WandbQualitativeCallback(TrainerCallback):
                 step=state.global_step,
                 epoch=float(state.epoch) if state.epoch is not None else None,
             )
-            if self._last_full_eval_step != state.global_step:
+            if (
+                self.enable_full_exact_match_eval
+                and self._last_full_eval_step != state.global_step
+            ):
                 self._last_full_eval_step = state.global_step
                 self._log_full_eval_exact_match(
                     model=model,
@@ -857,6 +862,7 @@ class InfillingDiffusionTrainer:
         wandb_run_name: Optional[str] = None,
         qual_num_samples_per_split: int = 64,
         qual_sampling_steps: Optional[int] = None,
+        full_exact_match_eval: bool = False,
         max_train_examples: Optional[int] = None,
         max_val_examples: Optional[int] = None,
         trust_remote_code: bool = True,
@@ -893,6 +899,7 @@ class InfillingDiffusionTrainer:
             if qual_sampling_steps is None
             else max(1, int(qual_sampling_steps))
         )
+        self.full_exact_match_eval = bool(full_exact_match_eval)
         self.max_train_examples = max_train_examples
         self.max_val_examples = max_val_examples
         self.wandb_enabled = bool(wandb_project)
@@ -1131,6 +1138,7 @@ class InfillingDiffusionTrainer:
                     "max_mask_ratio": self.max_mask_ratio,
                     "qual_num_samples_per_split": self.qual_num_samples_per_split,
                     "qual_sampling_steps": self.qual_sampling_steps,
+                    "full_exact_match_eval": self.full_exact_match_eval,
                     "max_train_examples": self.max_train_examples,
                     "max_val_examples": self.max_val_examples,
                     "use_lora": self.use_lora,
@@ -1164,6 +1172,7 @@ class InfillingDiffusionTrainer:
                     num_samples_per_split=self.qual_num_samples_per_split,
                     sampling_steps=self.qual_sampling_steps,
                     full_eval_batch_size=max(1, int(self.batch_size) * 2),
+                    enable_full_exact_match_eval=self.full_exact_match_eval,
                 )
             )
 

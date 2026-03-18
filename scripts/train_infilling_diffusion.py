@@ -118,6 +118,15 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--full-exact-match-eval",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Run the expensive full validation exact-match sweep during eval. "
+            "Disabled by default to avoid long rank-0-only work under DDP."
+        ),
+    )
+    parser.add_argument(
         "--max-train-examples",
         type=_optional_positive_int,
         default=None,
@@ -214,6 +223,7 @@ def main() -> None:
         wandb_run_name=args.wandb_run_name,
         qual_num_samples_per_split=args.qual_num_samples_per_split,
         qual_sampling_steps=args.qual_sampling_steps,
+        full_exact_match_eval=args.full_exact_match_eval,
         max_train_examples=args.max_train_examples,
         max_val_examples=args.max_val_examples,
         trust_remote_code=args.trust_remote_code,
