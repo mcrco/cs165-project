@@ -107,6 +107,50 @@ def _world_size() -> int:
     return 1
 
 
+def _checkpoint_step(path: Path) -> int:
+    match = re.fullmatch(r"checkpoint-(\d+)", path.name)
+    return int(match.group(1)) if match else -1
+
+
+def _resolve_resume_checkpoint(
+    resume_from_checkpoint: Optional[str], output_dir: str
+) -> Optional[str]:
+    if resume_from_checkpoint is None:
+        return None
+
+    normalized = str(resume_from_checkpoint).strip()
+    if not normalized:
+        return None
+
+    def _latest_checkpoint(root: Path) -> Optional[Path]:
+        candidates = [path for path in root.glob("checkpoint-*") if path.is_dir()]
+        if not candidates:
+            return None
+        return max(candidates, key=_checkpoint_step)
+
+    if normalized.lower() in {"latest", "last", "true"}:
+        latest = _latest_checkpoint(Path(output_dir))
+        if latest is None:
+            raise FileNotFoundError(
+                f"No checkpoint directories found under output_dir={output_dir!r}."
+            )
+        return str(latest)
+
+    checkpoint_path = Path(normalized)
+    if checkpoint_path.is_dir():
+        if (checkpoint_path / "trainer_state.json").exists():
+            return str(checkpoint_path)
+        latest = _latest_checkpoint(checkpoint_path)
+        if latest is not None:
+            return str(latest)
+
+    raise FileNotFoundError(
+        "resume_from_checkpoint must point to a checkpoint directory "
+        "or a directory containing checkpoint-* subdirectories: "
+        f"{normalized!r}"
+    )
+
+
 def _build_infilling_user_content(theorem_statement: str) -> str:
     chunks: List[str] = [
         "Implement a Lean 4 proof for the given formal statement.",
@@ -866,6 +910,7 @@ class InfillingDiffusionTrainer:
         max_train_examples: Optional[int] = None,
         max_val_examples: Optional[int] = None,
         trust_remote_code: bool = True,
+        resume_from_checkpoint: Optional[str] = None,
     ):
         if not train_path:
             raise ValueError("train_path is required")
@@ -905,6 +950,9 @@ class InfillingDiffusionTrainer:
         self.wandb_enabled = bool(wandb_project)
         self.is_main_process = _is_main_process()
         self.trust_remote_code = trust_remote_code
+        self.resume_from_checkpoint = _resolve_resume_checkpoint(
+            resume_from_checkpoint, output_dir
+        )
 
         # Auto-detect bf16 if not specified
         if bf16 is None:
@@ -1213,7 +1261,11 @@ class InfillingDiffusionTrainer:
         try:
             # Train
             print("Starting training...")
-            trainer.train()
+            if self.resume_from_checkpoint is not None:
+                print(f"Resuming from checkpoint: {self.resume_from_checkpoint}")
+                trainer.train(resume_from_checkpoint=self.resume_from_checkpoint)
+            else:
+                trainer.train()
 
             # Save
             print(f"Saving model to {self.output_dir}")

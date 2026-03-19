@@ -79,6 +79,19 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Directory to save checkpoints and final model (default: outputs/<wandb-run-name>).",
     )
+    parser.add_argument(
+        "--resume-from-checkpoint",
+        nargs="?",
+        const="latest",
+        default=None,
+        help=(
+            "Resume trainer/model state from a checkpoint directory. "
+            "Pass a path like outputs/.../checkpoint-62500, or omit the value to "
+            "resume from the latest checkpoint under --output-dir. "
+            "When resuming, --epochs is the total target epoch count, not the "
+            "number of extra epochs."
+        ),
+    )
     parser.add_argument("--epochs", type=float, default=20.0)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=2e-5)
@@ -227,6 +240,7 @@ def main() -> None:
         max_train_examples=args.max_train_examples,
         max_val_examples=args.max_val_examples,
         trust_remote_code=args.trust_remote_code,
+        resume_from_checkpoint=args.resume_from_checkpoint,
     )
 
     # Keep tqdm progress bars and suppress raw metric dict logs.
