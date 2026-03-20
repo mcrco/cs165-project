@@ -133,7 +133,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--full-exact-match-eval",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help=(
             "Run the expensive full validation exact-match sweep during eval. "
             "Disabled by default to avoid long rank-0-only work under DDP."

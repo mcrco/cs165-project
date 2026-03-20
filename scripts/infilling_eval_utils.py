@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 import torch
-from peft import AutoPeftModelForCausalLM
+from peft import AutoPeftModelForCausalLM, PeftConfig
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from lean_dojo_v2.diffusion import (
@@ -280,11 +280,17 @@ def load_ar_model(
     bf16: bool = True,
 ):
     dtype = effective_dtype(device, bf16)
+    base_model_name = model_name_or_path
+    tokenizer_source = model_name_or_path
+    if use_lora_adapter:
+        peft_config = PeftConfig.from_pretrained(model_name_or_path)
+        base_model_name = peft_config.base_model_name_or_path
+
     config = sanitize_rope_scaling(
-        AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=trust_remote_code)
+        AutoConfig.from_pretrained(base_model_name, trust_remote_code=trust_remote_code)
     )
     tokenizer = AutoTokenizer.from_pretrained(
-        model_name_or_path,
+        tokenizer_source,
         use_fast=True,
         trust_remote_code=trust_remote_code,
     )
