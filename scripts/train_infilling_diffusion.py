@@ -179,7 +179,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=True,
         help="Enable LoRA fine-tuning.",
     )
-    parser.add_argument("--lora-r", type=int, default=16)
+    parser.add_argument("--lora-r", type=int, default=32)
     parser.add_argument("--lora-alpha", type=int, default=32)
     parser.add_argument("--lora-dropout", type=float, default=0.05)
     parser.add_argument(

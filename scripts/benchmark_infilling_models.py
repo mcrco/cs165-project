@@ -172,6 +172,7 @@ def main() -> None:
         print_summary_block,
         resolve_device,
         resolve_eval_dataset_path,
+        summary_metrics_only,
         write_csv,
         write_json,
     )
@@ -275,6 +276,7 @@ def main() -> None:
             **ar_metrics,
         },
     ]
+    comparison_csv_rows = [summary_metrics_only(row) for row in comparison_rows]
     payload = {
         "dataset_path": str(dataset_path),
         "device": str(device),
@@ -282,7 +284,7 @@ def main() -> None:
         "comparison": comparison_rows,
     }
     write_json(args.json_output, payload)
-    write_csv(args.csv_output, comparison_rows)
+    write_csv(args.csv_output, comparison_csv_rows)
 
     if args.json_output:
         print(f"\nWrote JSON results to {args.json_output}")

@@ -7,6 +7,7 @@ from typing import Any, Optional
 
 import torch
 from peft import PeftConfig, PeftModel
+
 from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, AutoTokenizer
 
 from .families import (
@@ -16,6 +17,19 @@ from .families import (
     is_dream_model_name,
 )
 from .token_utils import resolve_mask_token_id
+
+
+def _ensure_prepare_inputs_for_generation(model) -> None:
+    """PEFT causal wrappers expect this on some custom architectures."""
+    if hasattr(model, "prepare_inputs_for_generation"):
+        return
+
+    def _prepare_inputs_for_generation(input_ids, **kwargs):
+        model_inputs = {"input_ids": input_ids}
+        model_inputs.update(kwargs)
+        return model_inputs
+
+    model.prepare_inputs_for_generation = _prepare_inputs_for_generation  # type: ignore[attr-defined]
 
 
 def sanitize_rope_scaling(cfg):
@@ -129,6 +143,7 @@ def load_diffusion_model(
             family=family,
             use_lora_adapter=False,
         )
+        _ensure_prepare_inputs_for_generation(base_model)
         model = PeftModel.from_pretrained(base_model, model_name_or_path)
     else:
         source_name = base_model_name or model_name_or_path

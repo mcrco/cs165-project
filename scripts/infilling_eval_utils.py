@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 import torch
 from peft import AutoPeftModelForCausalLM, PeftConfig
+from tqdm.auto import tqdm
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from lean_dojo_v2.diffusion import (
@@ -35,6 +37,20 @@ DEFAULT_DATASET_CANDIDATES = [
     REPO_ROOT / "datasets" / "april" / "leandojo_infilling" / "thme_val.jsonl",
     REPO_ROOT / "datasets" / "april" / "leandojo_infilling" / "thme.val.json",
 ]
+DETAILED_METRIC_KEYS = {"correct_examples", "length_stats_by_outcome"}
+
+
+def ensure_prepare_inputs_for_generation(model) -> None:
+    """PEFT causal wrappers expect this on some custom architectures."""
+    if hasattr(model, "prepare_inputs_for_generation"):
+        return
+
+    def _prepare_inputs_for_generation(input_ids, **kwargs):
+        model_inputs = {"input_ids": input_ids}
+        model_inputs.update(kwargs)
+        return model_inputs
+
+    model.prepare_inputs_for_generation = _prepare_inputs_for_generation  # type: ignore[attr-defined]
 
 
 def resolve_eval_dataset_path(dataset_path: Optional[str]) -> Path:
@@ -173,6 +189,67 @@ def percentile(values: Sequence[float], q: float) -> float:
     return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
 
 
+def summarize_lengths(values: Sequence[int]) -> Dict[str, float]:
+    if not values:
+        return {
+            "count": 0.0,
+            "mean": 0.0,
+            "p50": 0.0,
+            "p95": 0.0,
+            "min": 0.0,
+            "max": 0.0,
+        }
+
+    numeric_values = [float(value) for value in values]
+    return {
+        "count": float(len(numeric_values)),
+        "mean": sum(numeric_values) / float(len(numeric_values)),
+        "p50": percentile(numeric_values, 0.50),
+        "p95": percentile(numeric_values, 0.95),
+        "min": min(numeric_values),
+        "max": max(numeric_values),
+    }
+
+
+def summarize_text_lengths(texts: Sequence[str]) -> Dict[str, Dict[str, float]]:
+    cleaned_texts = [str(text or "") for text in texts]
+    return {
+        "chars": summarize_lengths([len(text) for text in cleaned_texts]),
+        "tokens": summarize_lengths([len(text.split()) for text in cleaned_texts]),
+        "lines": summarize_lengths(
+            [text.count("\n") + 1 if text else 0 for text in cleaned_texts]
+        ),
+    }
+
+
+def summarize_example_group(
+    example_rows: Sequence[Mapping[str, Any]],
+    *,
+    total_examples: int,
+) -> Dict[str, Any]:
+    return {
+        "count": len(example_rows),
+        "fraction": (
+            float(len(example_rows)) / float(total_examples) if total_examples > 0 else 0.0
+        ),
+        "target_tactic_length": summarize_text_lengths(
+            [str(row.get("target_tactic") or "") for row in example_rows]
+        ),
+        "predicted_tactic_length": summarize_text_lengths(
+            [str(row.get("predicted_tactic") or "") for row in example_rows]
+        ),
+        "proof_with_hole_length": summarize_text_lengths(
+            [str(row.get("proof_with_hole") or "") for row in example_rows]
+        ),
+    }
+
+
+def summary_metrics_only(metrics: Mapping[str, Any]) -> Dict[str, Any]:
+    return {
+        key: value for key, value in metrics.items() if key not in DETAILED_METRIC_KEYS
+    }
+
+
 def summarise_predictions(
     examples: Sequence[Dict[str, str]],
     predictions: Sequence[str],
@@ -186,23 +263,52 @@ def summarise_predictions(
     num_nonempty_predictions = 0
     num_valid_examples = 0
     valid_exact_matches = 0
+    example_rows: List[Dict[str, Any]] = []
+    correct_examples: List[Dict[str, Any]] = []
+    wrong_examples: List[Dict[str, Any]] = []
+    valid_examples: List[Dict[str, Any]] = []
+    invalid_examples: List[Dict[str, Any]] = []
 
     if valid_mask is None:
         valid_mask = [True] * num_examples
     if len(valid_mask) != num_examples:
         raise ValueError("valid_mask must align with examples.")
 
-    for example, prediction, is_valid in zip(examples, predictions, valid_mask):
-        expected_norm = normalize_tactic_for_exact_match(example.get("target_tactic", ""))
-        predicted_norm = normalize_tactic_for_exact_match(prediction)
+    for index, (example, prediction, is_valid) in enumerate(
+        zip(examples, predictions, valid_mask)
+    ):
+        target_tactic = str(example.get("target_tactic") or "")
+        predicted_tactic = str(prediction or "")
+        expected_norm = normalize_tactic_for_exact_match(target_tactic)
+        predicted_norm = normalize_tactic_for_exact_match(predicted_tactic)
+        is_exact_match = bool(expected_norm) and predicted_norm == expected_norm
+
+        example_row = {
+            "example_index": index,
+            "full_name": str(example.get("full_name") or ""),
+            "theorem_statement": str(example.get("theorem_statement") or ""),
+            "proof_with_hole": str(example.get("proof_with_hole") or ""),
+            "target_tactic": target_tactic,
+            "predicted_tactic": predicted_tactic,
+            "is_valid": bool(is_valid),
+            "is_exact_match": is_exact_match,
+        }
+        example_rows.append(example_row)
+
         if predicted_norm:
             num_nonempty_predictions += 1
-        if expected_norm and predicted_norm == expected_norm:
+        if is_exact_match:
             num_exact_matches += 1
+            correct_examples.append(example_row)
+        else:
+            wrong_examples.append(example_row)
         if is_valid:
             num_valid_examples += 1
-            if expected_norm and predicted_norm == expected_norm:
+            valid_examples.append(example_row)
+            if is_exact_match:
                 valid_exact_matches += 1
+        else:
+            invalid_examples.append(example_row)
 
     accuracy_all = (
         float(num_exact_matches) / float(num_examples) if num_examples > 0 else 0.0
@@ -223,6 +329,7 @@ def summarise_predictions(
         "num_exact_matches": num_exact_matches,
         "num_exact_matches_on_valid": valid_exact_matches,
         "num_nonempty_predictions": num_nonempty_predictions,
+        "num_correct_examples_saved": len(correct_examples),
         "exact_match_accuracy": accuracy_all,
         "exact_match_accuracy_on_valid": accuracy_valid,
         "nonempty_prediction_rate": nonempty_rate,
@@ -237,7 +344,93 @@ def summarise_predictions(
         ),
         "latency_seconds_p50_effective": percentile(latencies_seconds, 0.50),
         "latency_seconds_p95_effective": percentile(latencies_seconds, 0.95),
+        "correct_examples": correct_examples,
+        "length_stats_by_outcome": {
+            "all_examples": summarize_example_group(
+                example_rows,
+                total_examples=num_examples,
+            ),
+            "correct_examples": summarize_example_group(
+                correct_examples,
+                total_examples=num_examples,
+            ),
+            "wrong_examples": summarize_example_group(
+                wrong_examples,
+                total_examples=num_examples,
+            ),
+            "valid_examples": summarize_example_group(
+                valid_examples,
+                total_examples=num_examples,
+            ),
+            "invalid_examples": summarize_example_group(
+                invalid_examples,
+                total_examples=num_examples,
+            ),
+        },
     }
+
+
+def _decode_token_ids(
+    tokenizer,
+    token_ids: Sequence[int],
+    *,
+    skip_special_tokens: bool = False,
+) -> str:
+    return str(
+        tokenizer.decode(
+            list(token_ids),
+            skip_special_tokens=skip_special_tokens,
+            clean_up_tokenization_spaces=False,
+        )
+    )
+
+
+def build_generation_records(
+    examples: Sequence[Dict[str, str]],
+    predictions: Sequence[str],
+    *,
+    prompt_texts: Sequence[str],
+    full_texts: Sequence[str],
+    valid_mask: Optional[Sequence[bool]] = None,
+) -> List[Dict[str, Any]]:
+    num_examples = len(examples)
+    if len(predictions) != num_examples:
+        raise ValueError("predictions must align with examples.")
+    if len(prompt_texts) != num_examples:
+        raise ValueError("prompt_texts must align with examples.")
+    if len(full_texts) != num_examples:
+        raise ValueError("full_texts must align with examples.")
+
+    if valid_mask is None:
+        valid_mask = [True] * num_examples
+    if len(valid_mask) != num_examples:
+        raise ValueError("valid_mask must align with examples.")
+
+    records: List[Dict[str, Any]] = []
+    for index, (example, prediction, prompt_text, full_text, is_valid) in enumerate(
+        zip(examples, predictions, prompt_texts, full_texts, valid_mask)
+    ):
+        target_tactic = str(example.get("target_tactic") or "")
+        predicted_tactic = str(prediction or "")
+        expected_norm = normalize_tactic_for_exact_match(target_tactic)
+        predicted_norm = normalize_tactic_for_exact_match(predicted_tactic)
+        is_exact_match = bool(expected_norm) and predicted_norm == expected_norm
+        records.append(
+            {
+                "example_index": index,
+                "full_name": str(example.get("full_name") or ""),
+                "theorem_statement": str(example.get("theorem_statement") or ""),
+                "proof_with_hole": str(example.get("proof_with_hole") or ""),
+                "target_tactic": target_tactic,
+                "predicted_tactic": predicted_tactic,
+                "generated_text": predicted_tactic,
+                "prompt_text": str(prompt_text or ""),
+                "full_text": str(full_text or ""),
+                "is_valid": bool(is_valid),
+                "is_exact_match": is_exact_match,
+            }
+        )
+    return records
 
 
 def write_json(path: Optional[str], payload: Dict[str, Any]) -> None:
@@ -246,6 +439,17 @@ def write_json(path: Optional[str], payload: Dict[str, Any]) -> None:
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def write_jsonl(path: Optional[str], rows: Sequence[Mapping[str, Any]]) -> None:
+    if not path:
+        return
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(dict(row), sort_keys=True))
+            handle.write("\n")
 
 
 def write_csv(path: Optional[str], rows: Sequence[Dict[str, Any]]) -> None:
@@ -296,11 +500,11 @@ def load_ar_model(
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
 
     if use_lora_adapter:
         model = AutoPeftModelForCausalLM.from_pretrained(
             model_name_or_path,
-            config=config,
             torch_dtype=dtype,
             trust_remote_code=trust_remote_code,
         )
@@ -507,9 +711,10 @@ def predict_ar_batch(
     max_new_tokens: int,
     temperature: float,
     top_p: float,
-) -> List[str]:
+    return_prompt_texts: bool = False,
+):
     if not examples:
-        return []
+        return ([], []) if return_prompt_texts else []
 
     prompts = [
         _build_ar_infilling_prompt_prefix(
@@ -546,13 +751,18 @@ def predict_ar_batch(
         generated = model.generate(**generation_kwargs)
 
     predictions: List[str] = []
+    prompt_texts: List[str] = []
+    prompt_width = input_ids.shape[1]
     for batch_idx in range(generated.shape[0]):
-        prompt_len = int(attention_mask[batch_idx].sum().item())
-        completion_ids = generated[batch_idx].tolist()[prompt_len:]
+        prompt_ids = input_ids[batch_idx][attention_mask[batch_idx].bool()].tolist()
+        prompt_texts.append(_decode_token_ids(tokenizer, prompt_ids))
+        completion_ids = generated[batch_idx].tolist()[prompt_width:]
         decoded = tokenizer.decode(completion_ids, skip_special_tokens=True).strip()
         if decoded:
             decoded = decoded.splitlines()[0].strip()
         predictions.append(decoded)
+    if return_prompt_texts:
+        return predictions, prompt_texts
     return predictions
 
 
@@ -570,7 +780,9 @@ def benchmark_diffusion_examples(
     temperature: float,
     remasking: str,
     warmup_batches: int = 1,
-) -> Dict[str, Any]:
+    progress_desc: Optional[str] = None,
+    return_generation_records: bool = False,
+):
     prepared = prepare_diffusion_inputs(
         examples,
         tokenizer=tokenizer,
@@ -582,57 +794,109 @@ def benchmark_diffusion_examples(
     valid_entries = [
         (idx, row) for idx, row in enumerate(prepared) if row is not None
     ]
+    warmup_desc = (
+        f"{progress_desc} warmup"
+        if progress_desc
+        else f"diffusion warmup ({steps} steps)"
+    )
+    eval_desc = progress_desc or f"diffusion eval ({steps} steps)"
 
-    for batch_index, batch in enumerate(batched(valid_entries, batch_size)):
-        if batch_index >= max(0, int(warmup_batches)):
-            break
-        rows = [row for _, row in batch]
-        predict_diffusion_batch(
-            model,
-            tokenizer,
-            mask_token_id,
-            rows,
-            device=device,
-            steps=steps,
-            temperature=temperature,
-            remasking=remasking,
-        )
-        synchronize_device(device)
+    warmup_limit = max(0, int(warmup_batches))
+    if warmup_limit > 0 and valid_entries:
+        with tqdm(
+            total=min(len(valid_entries), warmup_limit * max(1, int(batch_size))),
+            desc=warmup_desc,
+            unit="ex",
+            dynamic_ncols=True,
+            mininterval=5.0,
+            file=sys.stdout,
+        ) as warmup_bar:
+            for batch_index, batch in enumerate(batched(valid_entries, batch_size)):
+                if batch_index >= warmup_limit:
+                    break
+                rows = [row for _, row in batch]
+                predict_diffusion_batch(
+                    model,
+                    tokenizer,
+                    mask_token_id,
+                    rows,
+                    device=device,
+                    steps=steps,
+                    temperature=temperature,
+                    remasking=remasking,
+                )
+                synchronize_device(device)
+                warmup_bar.update(len(batch))
 
     generation_seconds = 0.0
     per_example_latencies: List[float] = []
-    for batch in batched(valid_entries, batch_size):
-        indices = [idx for idx, _ in batch]
-        rows = [row for _, row in batch]
-        synchronize_device(device)
-        start_time = time.perf_counter()
-        batch_predictions = predict_diffusion_batch(
-            model,
-            tokenizer,
-            mask_token_id,
-            rows,
-            device=device,
-            steps=steps,
-            temperature=temperature,
-            remasking=remasking,
-        )
-        synchronize_device(device)
-        elapsed = time.perf_counter() - start_time
-        generation_seconds += elapsed
-        if batch_predictions:
-            per_example_latencies.extend(
-                [elapsed / float(len(batch_predictions))] * len(batch_predictions)
+    with tqdm(
+        total=len(valid_entries),
+        desc=eval_desc,
+        unit="ex",
+        dynamic_ncols=True,
+        mininterval=5.0,
+        file=sys.stdout,
+    ) as eval_bar:
+        for batch in batched(valid_entries, batch_size):
+            indices = [idx for idx, _ in batch]
+            rows = [row for _, row in batch]
+            synchronize_device(device)
+            start_time = time.perf_counter()
+            batch_predictions = predict_diffusion_batch(
+                model,
+                tokenizer,
+                mask_token_id,
+                rows,
+                device=device,
+                steps=steps,
+                temperature=temperature,
+                remasking=remasking,
             )
-        for idx, prediction in zip(indices, batch_predictions):
-            predictions[idx] = prediction
+            synchronize_device(device)
+            elapsed = time.perf_counter() - start_time
+            generation_seconds += elapsed
+            if batch_predictions:
+                per_example_latencies.extend(
+                    [elapsed / float(len(batch_predictions))] * len(batch_predictions)
+                )
+            for idx, prediction in zip(indices, batch_predictions):
+                predictions[idx] = prediction
+            eval_bar.update(len(batch))
 
-    return summarise_predictions(
+    metrics = summarise_predictions(
         examples,
         predictions,
         valid_mask=[row is not None for row in prepared],
         generation_seconds=generation_seconds,
         latencies_seconds=per_example_latencies,
     )
+    if not return_generation_records:
+        return metrics
+
+    prompt_texts: List[str] = []
+    full_texts: List[str] = []
+    for prediction, row in zip(predictions, prepared):
+        if row is None:
+            prompt_texts.append("")
+            full_texts.append("")
+            continue
+        input_ids = list(row["input_ids"])
+        mask_start = int(row["mask_start"])
+        mask_end = int(row["mask_end"])
+        prompt_texts.append(_decode_token_ids(tokenizer, input_ids))
+        prefix_text = _decode_token_ids(tokenizer, input_ids[:mask_start])
+        suffix_text = _decode_token_ids(tokenizer, input_ids[mask_end:])
+        full_texts.append(f"{prefix_text}{prediction}{suffix_text}")
+
+    generation_records = build_generation_records(
+        examples,
+        predictions,
+        prompt_texts=prompt_texts,
+        full_texts=full_texts,
+        valid_mask=[row is not None for row in prepared],
+    )
+    return metrics, generation_records
 
 
 def benchmark_ar_examples(
@@ -647,56 +911,98 @@ def benchmark_ar_examples(
     temperature: float,
     top_p: float,
     warmup_batches: int = 1,
-) -> Dict[str, Any]:
-    for batch_index, batch in enumerate(batched(examples, batch_size)):
-        if batch_index >= max(0, int(warmup_batches)):
-            break
-        predict_ar_batch(
-            model,
-            tokenizer,
-            batch,
-            device=device,
-            max_length=max_length,
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            top_p=top_p,
-        )
-        synchronize_device(device)
+    progress_desc: Optional[str] = None,
+    return_generation_records: bool = False,
+):
+    warmup_desc = f"{progress_desc} warmup" if progress_desc else "autoregressive warmup"
+    eval_desc = progress_desc or "autoregressive eval"
+    warmup_limit = max(0, int(warmup_batches))
+    if warmup_limit > 0 and examples:
+        with tqdm(
+            total=min(len(examples), warmup_limit * max(1, int(batch_size))),
+            desc=warmup_desc,
+            unit="ex",
+            dynamic_ncols=True,
+            mininterval=5.0,
+            file=sys.stdout,
+        ) as warmup_bar:
+            for batch_index, batch in enumerate(batched(examples, batch_size)):
+                if batch_index >= warmup_limit:
+                    break
+                predict_ar_batch(
+                    model,
+                    tokenizer,
+                    batch,
+                    device=device,
+                    max_length=max_length,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                )
+                synchronize_device(device)
+                warmup_bar.update(len(batch))
 
     predictions = [""] * len(examples)
+    prompt_texts = [""] * len(examples)
     generation_seconds = 0.0
     per_example_latencies: List[float] = []
-    for start_index, batch in enumerate(batched(examples, batch_size)):
-        synchronize_device(device)
-        start_time = time.perf_counter()
-        batch_predictions = predict_ar_batch(
-            model,
-            tokenizer,
-            batch,
-            device=device,
-            max_length=max_length,
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            top_p=top_p,
-        )
-        synchronize_device(device)
-        elapsed = time.perf_counter() - start_time
-        generation_seconds += elapsed
-        if batch_predictions:
-            per_example_latencies.extend(
-                [elapsed / float(len(batch_predictions))] * len(batch_predictions)
+    with tqdm(
+        total=len(examples),
+        desc=eval_desc,
+        unit="ex",
+        dynamic_ncols=True,
+        mininterval=5.0,
+        file=sys.stdout,
+    ) as eval_bar:
+        for start_index, batch in enumerate(batched(examples, batch_size)):
+            synchronize_device(device)
+            start_time = time.perf_counter()
+            batch_predictions, batch_prompt_texts = predict_ar_batch(
+                model,
+                tokenizer,
+                batch,
+                device=device,
+                max_length=max_length,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                return_prompt_texts=True,
             )
-        batch_start = start_index * max(1, int(batch_size))
-        for offset, prediction in enumerate(batch_predictions):
-            predictions[batch_start + offset] = prediction
+            synchronize_device(device)
+            elapsed = time.perf_counter() - start_time
+            generation_seconds += elapsed
+            if batch_predictions:
+                per_example_latencies.extend(
+                    [elapsed / float(len(batch_predictions))] * len(batch_predictions)
+                )
+            batch_start = start_index * max(1, int(batch_size))
+            for offset, prediction in enumerate(batch_predictions):
+                predictions[batch_start + offset] = prediction
+            for offset, prompt_text in enumerate(batch_prompt_texts):
+                prompt_texts[batch_start + offset] = prompt_text
+            eval_bar.update(len(batch))
 
-    return summarise_predictions(
+    metrics = summarise_predictions(
         examples,
         predictions,
         valid_mask=[True] * len(examples),
         generation_seconds=generation_seconds,
         latencies_seconds=per_example_latencies,
     )
+    if not return_generation_records:
+        return metrics
+
+    generation_records = build_generation_records(
+        examples,
+        predictions,
+        prompt_texts=prompt_texts,
+        full_texts=[
+            f"{prompt_text}{prediction}"
+            for prompt_text, prediction in zip(prompt_texts, predictions)
+        ],
+        valid_mask=[True] * len(examples),
+    )
+    return metrics, generation_records
 
 
 def default_diffusion_steps(model_name_or_path: str) -> int:
@@ -710,6 +1016,17 @@ def default_diffusion_remasking(model_name_or_path: str) -> str:
 
 
 def print_summary_block(name: str, metrics: Dict[str, Any]) -> None:
+    length_stats = metrics.get("length_stats_by_outcome", {})
+    correct_stats = length_stats.get("correct_examples", {}) if isinstance(length_stats, dict) else {}
+    wrong_stats = length_stats.get("wrong_examples", {}) if isinstance(length_stats, dict) else {}
+    correct_tactic_chars = correct_stats.get("target_tactic_length", {}).get("chars", {})
+    wrong_tactic_chars = wrong_stats.get("target_tactic_length", {}).get("chars", {})
+    correct_proof_chars = correct_stats.get("proof_with_hole_length", {}).get("chars", {})
+    wrong_proof_chars = wrong_stats.get("proof_with_hole_length", {}).get("chars", {})
+
+    def _format_mean_p50(stats: Mapping[str, Any]) -> str:
+        return f"{float(stats.get('mean', 0.0)):.1f} / {float(stats.get('p50', 0.0)):.1f}"
+
     print(f"{name}:")
     print(f"  exact-match accuracy:          {metrics['exact_match_accuracy']:.4f}")
     print(
@@ -733,5 +1050,16 @@ def print_summary_block(name: str, metrics: Dict[str, Any]) -> None:
         f"{metrics['latency_seconds_mean_effective'] * 1000.0:.1f} / "
         f"{metrics['latency_seconds_p50_effective'] * 1000.0:.1f} / "
         f"{metrics['latency_seconds_p95_effective'] * 1000.0:.1f}"
+    )
+    print(
+        f"  saved exact-match examples:    {metrics.get('num_correct_examples_saved', 0)}"
+    )
+    print(
+        "  target tactic length chars right/wrong mean/p50: "
+        f"{_format_mean_p50(correct_tactic_chars)} vs {_format_mean_p50(wrong_tactic_chars)}"
+    )
+    print(
+        "  proof-with-hole length chars right/wrong mean/p50: "
+        f"{_format_mean_p50(correct_proof_chars)} vs {_format_mean_p50(wrong_proof_chars)}"
     )
 

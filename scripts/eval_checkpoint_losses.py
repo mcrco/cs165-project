@@ -10,7 +10,7 @@ import random
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import torch
 from peft import PeftConfig
@@ -38,9 +38,9 @@ from lean_dojo_v2.trainer.infilling_diffusion_trainer import InfillingMDMDataset
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_EXPERIMENT_DIRS = [
     # REPO_ROOT / "outputs" / "infilling-ar-april-thme-train10k-val1k",
-    REPO_ROOT / "outputs" / "infilling-ar-april-thme-train100k-val10k",
     # REPO_ROOT / "outputs" / "infilling-diffusion-april-thme-train10k-val1k",
     REPO_ROOT / "outputs" / "infilling-diffusion-april-thme-train100k-val10k",
+    REPO_ROOT / "outputs" / "infilling-ar-april-thme-train100k-val10k",
 ]
 DEFAULT_ANALYSIS_DIR = REPO_ROOT / "outputs" / "analysis" / "checkpoint_loss_curves"
 CHECKPOINT_PREFIX = "checkpoint-"
@@ -96,6 +96,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--dataset-path",
         default=DEFAULT_DATASET_PATH,
         help="Validation dataset path (JSON or JSONL).",
+    )
+    parser.add_argument(
+        "--max-examples",
+        type=_positive_int,
+        default=10_000,
+        help="Maximum number of usable validation examples to preprocess per checkpoint.",
     )
     parser.add_argument(
         "--min-epoch",
@@ -176,14 +182,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--diffusion-min-mask-ratio",
         type=float,
-        default=0.25,
-        help="Minimum diffusion masking ratio used during eval-loss computation.",
+        default=1.0,
+        help=(
+            "Minimum diffusion masking ratio used during eval-loss computation. "
+            "Defaults to 1.0 so diffusion eval is inference-like with the full "
+            "hole masked."
+        ),
     )
     parser.add_argument(
         "--diffusion-max-mask-ratio",
         type=float,
         default=1.0,
-        help="Maximum diffusion masking ratio used during eval-loss computation.",
+        help=(
+            "Maximum diffusion masking ratio used during eval-loss computation. "
+            "Defaults to 1.0 so diffusion eval is inference-like with the full "
+            "hole masked."
+        ),
     )
     parser.add_argument(
         "--diffusion-batch-size",
@@ -406,9 +420,11 @@ def evaluate_ar_checkpoint(
     prefer_bf16: bool,
     batch_size: int,
     max_length: int,
+    max_examples: int,
     analysis_dir: Path,
     disable_tqdm: bool,
-) -> Dict[str, Any]:
+    eval_dataset: Optional[Any] = None,
+) -> Tuple[Dict[str, Any], Any]:
     tokenizer, model = load_ar_model(
         str(checkpoint.checkpoint_dir),
         device=device,
@@ -419,11 +435,13 @@ def evaluate_ar_checkpoint(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    eval_dataset = InfillingARDataset(
-        str(dataset_path),
-        tokenizer=tokenizer,
-        max_length=max_length,
-    ).to_hf()
+    if eval_dataset is None:
+        eval_dataset = InfillingARDataset(
+            str(dataset_path),
+            tokenizer=tokenizer,
+            max_length=max_length,
+            max_examples=max_examples,
+        ).to_hf()
     data_collator = InfillingARCollator(
         tokenizer=tokenizer,
         pad_token_id=tokenizer.pad_token_id,
@@ -442,7 +460,7 @@ def evaluate_ar_checkpoint(
     )
     metrics = trainer.evaluate()
     metrics["num_eval_examples"] = len(eval_dataset)
-    return metrics
+    return metrics, eval_dataset
 
 
 def evaluate_diffusion_checkpoint(
@@ -454,13 +472,15 @@ def evaluate_diffusion_checkpoint(
     prefer_bf16: bool,
     batch_size: int,
     max_length: int,
+    max_examples: int,
     mask_span_length: int,
     min_mask_ratio: float,
     max_mask_ratio: float,
     seed: int,
     analysis_dir: Path,
     disable_tqdm: bool,
-) -> Dict[str, Any]:
+    eval_dataset: Optional[Any] = None,
+) -> Tuple[Dict[str, Any], Any]:
     components = load_diffusion_model_bundle(
         str(checkpoint.checkpoint_dir),
         device=device,
@@ -469,12 +489,14 @@ def evaluate_diffusion_checkpoint(
         bf16=prefer_bf16,
     )
     _set_eval_seed(seed)
-    eval_dataset = InfillingMDMDataset(
-        str(dataset_path),
-        tokenizer=components.tokenizer,
-        max_length=max_length,
-        mask_span_length=mask_span_length,
-    ).to_hf()
+    if eval_dataset is None:
+        eval_dataset = InfillingMDMDataset(
+            str(dataset_path),
+            tokenizer=components.tokenizer,
+            max_length=max_length,
+            mask_span_length=mask_span_length,
+            max_examples=max_examples,
+        ).to_hf()
     training_objective = create_diffusion_training_objective(
         family=components.family,
         mode="infilling",
@@ -499,7 +521,7 @@ def evaluate_diffusion_checkpoint(
     )
     metrics = trainer.evaluate()
     metrics["num_eval_examples"] = len(eval_dataset)
-    return metrics
+    return metrics, eval_dataset
 
 
 def cleanup_after_eval(device: torch.device) -> None:
@@ -649,6 +671,11 @@ def main() -> None:
     print(f"Device: {device}")
     print(f"Analysis dir: {analysis_dir}")
     print(f"Target epoch window: {args.min_epoch}..{args.max_epoch}")
+    print(f"Max eval examples per checkpoint: {args.max_examples:,}")
+    print(
+        "Diffusion eval mask ratio range: "
+        f"{args.diffusion_min_mask_ratio:g}..{args.diffusion_max_mask_ratio:g}"
+    )
 
     for experiment_dir in experiment_dirs:
         print(f"\nInspecting {experiment_dir}")
@@ -721,6 +748,7 @@ def main() -> None:
             min_epoch=args.min_epoch,
             max_epoch=args.max_epoch,
         )
+        cached_eval_dataset: Optional[Any] = None
         manifest_rows.append(build_experiment_manifest_row(experiment_dir, checkpoints, selections))
 
         latest = latest_checkpoint(checkpoints)
@@ -768,7 +796,7 @@ def main() -> None:
             )
             try:
                 if checkpoint.model_family == "ar":
-                    metrics = evaluate_ar_checkpoint(
+                    metrics, cached_eval_dataset = evaluate_ar_checkpoint(
                         checkpoint,
                         dataset_path=dataset_path,
                         device=device,
@@ -776,11 +804,13 @@ def main() -> None:
                         prefer_bf16=args.bf16,
                         batch_size=args.ar_batch_size,
                         max_length=args.ar_max_length,
+                        max_examples=args.max_examples,
                         analysis_dir=analysis_dir,
                         disable_tqdm=not args.progress_bars,
+                        eval_dataset=cached_eval_dataset,
                     )
                 else:
-                    metrics = evaluate_diffusion_checkpoint(
+                    metrics, cached_eval_dataset = evaluate_diffusion_checkpoint(
                         checkpoint,
                         dataset_path=dataset_path,
                         device=device,
@@ -788,12 +818,14 @@ def main() -> None:
                         prefer_bf16=args.bf16,
                         batch_size=args.diffusion_batch_size,
                         max_length=args.diffusion_max_length,
+                        max_examples=args.max_examples,
                         mask_span_length=args.diffusion_mask_span_length,
                         min_mask_ratio=args.diffusion_min_mask_ratio,
                         max_mask_ratio=args.diffusion_max_mask_ratio,
                         seed=args.seed,
                         analysis_dir=analysis_dir,
                         disable_tqdm=not args.progress_bars,
+                        eval_dataset=cached_eval_dataset,
                     )
                 checkpoint_eval_rows.append(
                     build_checkpoint_eval_row(
@@ -830,6 +862,7 @@ def main() -> None:
         "device": str(device),
         "seed": int(args.seed),
         "analysis_dir": str(analysis_dir),
+        "max_examples": int(args.max_examples),
         "epoch_window": {"min_epoch": int(args.min_epoch), "max_epoch": int(args.max_epoch)},
         "experiments": manifest_rows,
         "checkpoint_eval_rows": checkpoint_eval_rows,
