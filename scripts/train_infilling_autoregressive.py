@@ -61,6 +61,30 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--logging-steps", type=int, default=10)
     parser.add_argument("--save-strategy", default="epoch")
     parser.add_argument(
+        "--qual-num-samples-per-split",
+        type=int,
+        default=64,
+        help="Number of train/val examples to include in qualitative sample tables.",
+    )
+    parser.add_argument(
+        "--subset-eval-num-samples",
+        type=int,
+        default=512,
+        help=(
+            "Number of fixed validation examples to score each eval for the cheap "
+            "checkpoint-selection exact-match metric."
+        ),
+    )
+    parser.add_argument(
+        "--full-exact-match-eval",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Run the expensive full validation exact-match sweep during eval. "
+            "Disabled by default to avoid long rank-0-only work under DDP."
+        ),
+    )
+    parser.add_argument(
         "--max-train-examples",
         type=_optional_positive_int,
         default=None,
@@ -147,6 +171,9 @@ def main() -> None:
         save_strategy=args.save_strategy,
         wandb_project=args.wandb_project,
         wandb_run_name=args.wandb_run_name,
+        qual_num_samples_per_split=args.qual_num_samples_per_split,
+        subset_eval_num_samples=args.subset_eval_num_samples,
+        full_exact_match_eval=args.full_exact_match_eval,
         max_train_examples=args.max_train_examples,
         max_val_examples=args.max_val_examples,
         trust_remote_code=args.trust_remote_code,

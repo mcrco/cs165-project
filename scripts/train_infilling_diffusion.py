@@ -114,7 +114,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--eval-every-n-epochs",
         type=_positive_int,
-        default=10,
+        default=1,
         help=(
             "Run validation once every N training epochs when validation is enabled. "
             "Use 1 to evaluate every epoch."
@@ -147,7 +147,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--full-exact-match-eval",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help=(
             "Run the expensive full validation exact-match sweep during eval. "
             "Disabled by default to avoid long rank-0-only work under DDP."
