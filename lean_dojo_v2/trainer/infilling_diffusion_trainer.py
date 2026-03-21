@@ -439,12 +439,13 @@ class WandbQualitativeCallback(TrainerCallback):
     def __init__(
         self,
         *,
-        wandb_module,
+        wandb_module=None,
         tokenizer,
         mask_token_id: int,
         train_dataset: Dataset,
         eval_dataset: Optional[Dataset],
         num_samples_per_split: int,
+        subset_eval_num_samples: int = 512,
         sampling_steps: int = DEFAULT_DIFFUSION_STEPS,
         sampling_temperature: float = DEFAULT_DIFFUSION_TEMPERATURE,
         sampling_remasking: str = DEFAULT_REMASKING,
@@ -481,6 +482,15 @@ class WandbQualitativeCallback(TrainerCallback):
             if eval_dataset is not None
             else []
         )
+        self.subset_eval_indices = (
+            self._sample_indices(
+                eval_dataset,
+                seed + 2,
+                num_samples=max(1, int(subset_eval_num_samples)),
+            )
+            if eval_dataset is not None
+            else []
+        )
         self._qual_columns = [
             "split",
             "sample_id",
@@ -494,6 +504,7 @@ class WandbQualitativeCallback(TrainerCallback):
         self.train_history_rows: List[Tuple[Any, ...]] = []
         self.val_history_rows: List[Tuple[Any, ...]] = []
         self._last_full_eval_step: Optional[int] = None
+        self._last_subset_eval_step: Optional[int] = None
 
     def _rows_to_table(self, rows: List[Tuple[Any, ...]]):
         table = self.wandb.Table(columns=self._qual_columns)
@@ -501,17 +512,34 @@ class WandbQualitativeCallback(TrainerCallback):
             table.add_data(*record)
         return table
 
-    def _sample_indices(self, dataset: Optional[Dataset], seed: int) -> List[int]:
+    def _sample_indices(
+        self,
+        dataset: Optional[Dataset],
+        seed: int,
+        *,
+        num_samples: Optional[int] = None,
+    ) -> List[int]:
         if dataset is None:
             return []
         n = len(dataset)
         if n == 0:
             return []
-        k = min(self.num_samples_per_split, n)
+        target_samples = self.num_samples_per_split if num_samples is None else num_samples
+        k = min(max(1, int(target_samples)), n)
         if k == n:
             return list(range(n))
         rng = random.Random(seed)
         return sorted(rng.sample(range(n), k))
+
+    def _log_payload(self, payload: Dict[str, Any], *, step: int) -> None:
+        if self.wandb is None or not payload:
+            return
+        run = getattr(self.wandb, "run", None)
+        current_step = getattr(run, "step", None)
+        if current_step is None:
+            self.wandb.log(payload, step=step)
+        else:
+            self.wandb.log(payload, step=max(step, int(current_step)))
 
     def _decode_predicted_tactic(self, token_ids: List[int]) -> str:
         return decode_until_stop(self.tokenizer, token_ids, self.mask_token_id)
@@ -665,104 +693,26 @@ class WandbQualitativeCallback(TrainerCallback):
 
         return predictions
 
-    def _log_split(
+    def _compute_exact_match_payload(
         self,
         *,
         model,
-        split: str,
         dataset: Optional[Dataset],
         indices: List[int],
-        step: int,
-        epoch: Optional[float],
-    ):
+        metric_prefix: str,
+    ) -> Dict[str, Any]:
         if dataset is None or not indices:
-            return
-
-        history_rows = (
-            self.train_history_rows if split == "train" else self.val_history_rows
-        )
-        snapshot_table = (
-            self.wandb.Table(columns=self._qual_columns)
-            if self.log_snapshot_table
-            else None
-        )
-        num_examples = 0
-        num_exact_matches = 0
-        for idx in indices:
-            row = dataset[idx]
-            full_name = row.get("full_name", "")
-            theorem_statement = row.get("theorem_statement", "")
-            theorem = full_name.strip()
-            if theorem_statement:
-                theorem = (
-                    f"{theorem}: {theorem_statement}" if theorem else theorem_statement
-                )
-
-            prompt = self._format_display_prompt(row)
-            expected_tactic = row.get("target_tactic", "")
-            predicted_tactic = self._predict_tactic(model, row)
-            expected_norm = _normalize_tactic_for_exact_match(expected_tactic)
-            predicted_norm = _normalize_tactic_for_exact_match(predicted_tactic)
-            num_examples += 1
-            if expected_norm and expected_norm == predicted_norm:
-                num_exact_matches += 1
-
-            record = (
-                split,
-                int(idx),
-                _truncate_text_for_table(theorem, self.max_cell_chars),
-                _truncate_text_for_table(prompt, self.max_cell_chars),
-                _truncate_text_for_table(expected_tactic, self.max_cell_chars),
-                _truncate_text_for_table(predicted_tactic, self.max_cell_chars),
-                step,
-                float(epoch) if epoch is not None else None,
-            )
-            if self.log_history_table:
-                history_rows.append(record)
-            if snapshot_table is not None:
-                snapshot_table.add_data(*record)
-
-        payload: Dict[str, Any] = {}
-        exact_match_accuracy = (
-            float(num_exact_matches) / float(num_examples) if num_examples > 0 else 0.0
-        )
-        payload[f"{split}_qualitative_exact_match_accuracy"] = exact_match_accuracy
-        payload[f"{split}_qualitative_num_samples"] = num_examples
-        payload[f"{split}_qualitative_num_exact_matches"] = num_exact_matches
-        if self.log_history_table:
-            payload[f"{split}_qualitative_samples"] = self._rows_to_table(history_rows)
-        if snapshot_table is not None:
-            payload[f"{split}_qualitative_samples_snapshot"] = snapshot_table
-        if payload:
-            # Keep qualitative logs monotonic with the main trainer's W&B step.
-            run = getattr(self.wandb, "run", None)
-            current_step = getattr(run, "step", None)
-            if current_step is None:
-                self.wandb.log(payload, step=step)
-            else:
-                self.wandb.log(payload, step=max(step, int(current_step)))
-
-    def _log_full_eval_exact_match(
-        self,
-        *,
-        model,
-        step: int,
-        epoch: Optional[float],
-    ) -> None:
-        if self.eval_dataset is None or len(self.eval_dataset) == 0:
-            return
+            return {
+                f"{metric_prefix}_exact_match_accuracy": 0.0,
+                f"{metric_prefix}_num_samples": 0,
+                f"{metric_prefix}_num_exact_matches": 0,
+            }
 
         num_examples = 0
         num_exact_matches = 0
-        num_rows = len(self.eval_dataset)
-        for start in tqdm(
-            range(0, num_rows, self.full_eval_batch_size),
-            desc="Full val exact-match eval",
-            unit="batch",
-            leave=False,
-        ):
-            end = min(start + self.full_eval_batch_size, num_rows)
-            rows = [self.eval_dataset[idx] for idx in range(start, end)]
+        for start in range(0, len(indices), self.full_eval_batch_size):
+            batch_indices = indices[start : start + self.full_eval_batch_size]
+            rows = [dataset[idx] for idx in batch_indices]
             predicted_tactics = self._predict_tactics_batch(model, rows)
             for row, predicted_tactic in zip(rows, predicted_tactics):
                 expected_tactic = row.get("target_tactic", "")
@@ -775,21 +725,109 @@ class WandbQualitativeCallback(TrainerCallback):
         exact_match_accuracy = (
             float(num_exact_matches) / float(num_examples) if num_examples > 0 else 0.0
         )
-        payload: Dict[str, Any] = {
-            "val_full_exact_match_accuracy": exact_match_accuracy,
-            "val_full_num_samples": num_examples,
-            "val_full_num_exact_matches": num_exact_matches,
+        return {
+            f"{metric_prefix}_exact_match_accuracy": exact_match_accuracy,
+            f"{metric_prefix}_num_samples": num_examples,
+            f"{metric_prefix}_num_exact_matches": num_exact_matches,
         }
+
+    def _log_split(
+        self,
+        *,
+        model,
+        split: str,
+        dataset: Optional[Dataset],
+        indices: List[int],
+        step: int,
+        epoch: Optional[float],
+    ):
+        if dataset is None or not indices:
+            return {}
+
+        history_rows = (
+            self.train_history_rows if split == "train" else self.val_history_rows
+        )
+        snapshot_table = (
+            self.wandb.Table(columns=self._qual_columns)
+            if self.log_snapshot_table and self.wandb is not None
+            else None
+        )
+        num_examples = 0
+        num_exact_matches = 0
+        for start in range(0, len(indices), self.full_eval_batch_size):
+            batch_indices = indices[start : start + self.full_eval_batch_size]
+            rows = [dataset[idx] for idx in batch_indices]
+            predicted_tactics = self._predict_tactics_batch(model, rows)
+            for idx, row, predicted_tactic in zip(
+                batch_indices, rows, predicted_tactics
+            ):
+                full_name = row.get("full_name", "")
+                theorem_statement = row.get("theorem_statement", "")
+                theorem = full_name.strip()
+                if theorem_statement:
+                    theorem = (
+                        f"{theorem}: {theorem_statement}"
+                        if theorem
+                        else theorem_statement
+                    )
+
+                prompt = self._format_display_prompt(row)
+                expected_tactic = row.get("target_tactic", "")
+                expected_norm = _normalize_tactic_for_exact_match(expected_tactic)
+                predicted_norm = _normalize_tactic_for_exact_match(predicted_tactic)
+                num_examples += 1
+                if expected_norm and expected_norm == predicted_norm:
+                    num_exact_matches += 1
+
+                record = (
+                    split,
+                    int(idx),
+                    _truncate_text_for_table(theorem, self.max_cell_chars),
+                    _truncate_text_for_table(prompt, self.max_cell_chars),
+                    _truncate_text_for_table(expected_tactic, self.max_cell_chars),
+                    _truncate_text_for_table(predicted_tactic, self.max_cell_chars),
+                    step,
+                    float(epoch) if epoch is not None else None,
+                )
+                if self.log_history_table:
+                    history_rows.append(record)
+                if snapshot_table is not None:
+                    snapshot_table.add_data(*record)
+
+        payload: Dict[str, Any] = {
+            f"{split}_qualitative_exact_match_accuracy": (
+                float(num_exact_matches) / float(num_examples)
+                if num_examples > 0
+                else 0.0
+            ),
+            f"{split}_qualitative_num_samples": num_examples,
+            f"{split}_qualitative_num_exact_matches": num_exact_matches,
+        }
+        if self.log_history_table and self.wandb is not None:
+            payload[f"{split}_qualitative_samples"] = self._rows_to_table(history_rows)
+        if snapshot_table is not None:
+            payload[f"{split}_qualitative_samples_snapshot"] = snapshot_table
+        self._log_payload(payload, step=step)
+        return payload
+
+    def _log_full_eval_exact_match(
+        self,
+        *,
+        model,
+        step: int,
+        epoch: Optional[float],
+    ) -> None:
+        if self.eval_dataset is None or len(self.eval_dataset) == 0:
+            return
+        payload = self._compute_exact_match_payload(
+            model=model,
+            dataset=self.eval_dataset,
+            indices=list(range(len(self.eval_dataset))),
+            metric_prefix="val_full",
+        )
         if epoch is not None:
             payload["val_full_epoch"] = float(epoch)
-
-        # Keep full-eval logs monotonic with the main trainer's W&B step.
-        run = getattr(self.wandb, "run", None)
-        current_step = getattr(run, "step", None)
-        if current_step is None:
-            self.wandb.log(payload, step=step)
-        else:
-            self.wandb.log(payload, step=max(step, int(current_step)))
+        self._log_payload(payload, step=step)
 
     def _maybe_log_split(
         self,
@@ -832,7 +870,7 @@ class WandbQualitativeCallback(TrainerCallback):
         return
 
     def on_epoch_end(self, args, state, control, model=None, **kwargs):
-        if model is None or state.global_step <= 0:
+        if model is None or state.global_step <= 0 or self.wandb is None:
             return
         try:
             self._maybe_log_split(
@@ -851,16 +889,38 @@ class WandbQualitativeCallback(TrainerCallback):
         if model is None:
             return
         was_training = model.training
+        metrics = kwargs.get("metrics")
         try:
             model.eval()
-            self._maybe_log_split(
-                model=model,
-                split="val",
-                step=state.global_step,
-                epoch=float(state.epoch) if state.epoch is not None else None,
-            )
+            if self.wandb is not None:
+                self._maybe_log_split(
+                    model=model,
+                    split="val",
+                    step=state.global_step,
+                    epoch=float(state.epoch) if state.epoch is not None else None,
+                )
+            if self._last_subset_eval_step != state.global_step:
+                self._last_subset_eval_step = state.global_step
+                subset_payload = self._compute_exact_match_payload(
+                    model=model,
+                    dataset=self.eval_dataset,
+                    indices=self.subset_eval_indices,
+                    metric_prefix="val_subset",
+                )
+                self._log_payload(subset_payload, step=state.global_step)
+                if isinstance(metrics, dict):
+                    metrics["eval_subset_exact_match_accuracy"] = subset_payload[
+                        "val_subset_exact_match_accuracy"
+                    ]
+                    metrics["eval_subset_num_samples"] = subset_payload[
+                        "val_subset_num_samples"
+                    ]
+                    metrics["eval_subset_num_exact_matches"] = subset_payload[
+                        "val_subset_num_exact_matches"
+                    ]
             if (
-                self.enable_full_exact_match_eval
+                self.wandb is not None
+                and self.enable_full_exact_match_eval
                 and self._last_full_eval_step != state.global_step
             ):
                 self._last_full_eval_step = state.global_step
@@ -905,7 +965,8 @@ class InfillingDiffusionTrainer:
         wandb_project: Optional[str] = "infilling",
         wandb_run_name: Optional[str] = None,
         qual_num_samples_per_split: int = 64,
-        qual_sampling_steps: Optional[int] = None,
+        subset_eval_num_samples: int = 512,
+        qual_sampling_steps: Optional[int] = 16,
         full_exact_match_eval: bool = False,
         max_train_examples: Optional[int] = None,
         max_val_examples: Optional[int] = None,
@@ -939,6 +1000,7 @@ class InfillingDiffusionTrainer:
         self.wandb_project = wandb_project
         self.wandb_run_name = wandb_run_name
         self.qual_num_samples_per_split = qual_num_samples_per_split
+        self.subset_eval_num_samples = max(1, int(subset_eval_num_samples))
         self.qual_sampling_steps = (
             self.sampling_config.steps
             if qual_sampling_steps is None
@@ -1003,7 +1065,10 @@ class InfillingDiffusionTrainer:
             eval_strategy=eval_strategy,
             logging_steps=logging_steps,
             load_best_model_at_end=load_best_model_at_end,
-            metric_for_best_model="eval_loss" if load_best_model_at_end else None,
+            metric_for_best_model=(
+                "eval_subset_exact_match_accuracy" if load_best_model_at_end else None
+            ),
+            greater_is_better=True if load_best_model_at_end else None,
             run_name=wandb_run_name,
         )
 
@@ -1185,6 +1250,7 @@ class InfillingDiffusionTrainer:
                     "min_mask_ratio": self.min_mask_ratio,
                     "max_mask_ratio": self.max_mask_ratio,
                     "qual_num_samples_per_split": self.qual_num_samples_per_split,
+                    "subset_eval_num_samples": self.subset_eval_num_samples,
                     "qual_sampling_steps": self.qual_sampling_steps,
                     "full_exact_match_eval": self.full_exact_match_eval,
                     "max_train_examples": self.max_train_examples,
@@ -1208,21 +1274,20 @@ class InfillingDiffusionTrainer:
         # Create collator
         data_collator = self.training_objective
 
-        callbacks = []
-        if self.wandb_enabled and wandb_module is not None:
-            callbacks.append(
-                WandbQualitativeCallback(
-                    wandb_module=wandb_module,
-                    tokenizer=self.tokenizer,
-                    mask_token_id=self.mask_token_id,
-                    train_dataset=train_dataset,
-                    eval_dataset=eval_dataset,
-                    num_samples_per_split=self.qual_num_samples_per_split,
-                    sampling_steps=self.qual_sampling_steps,
-                    full_eval_batch_size=max(1, int(self.batch_size) * 2),
-                    enable_full_exact_match_eval=self.full_exact_match_eval,
-                )
+        callbacks = [
+            WandbQualitativeCallback(
+                wandb_module=wandb_module,
+                tokenizer=self.tokenizer,
+                mask_token_id=self.mask_token_id,
+                train_dataset=train_dataset,
+                eval_dataset=eval_dataset,
+                num_samples_per_split=self.qual_num_samples_per_split,
+                subset_eval_num_samples=self.subset_eval_num_samples,
+                sampling_steps=self.qual_sampling_steps,
+                full_eval_batch_size=max(1, int(self.batch_size) * 2),
+                enable_full_exact_match_eval=self.full_exact_match_eval,
             )
+        ]
 
         # Create trainer
         trainer = MdlmTrainer(

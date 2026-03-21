@@ -120,14 +120,28 @@ def _build_parser() -> argparse.ArgumentParser:
             "Use 1 to evaluate every epoch."
         ),
     )
-    parser.add_argument("--qual-num-samples-per-split", type=int, default=64)
+    parser.add_argument(
+        "--qual-num-samples-per-split",
+        type=int,
+        default=64,
+        help="Number of train/val examples to include in qualitative sample tables.",
+    )
+    parser.add_argument(
+        "--subset-eval-num-samples",
+        type=int,
+        default=512,
+        help=(
+            "Number of fixed validation examples to denoise each eval for the cheap "
+            "checkpoint-selection exact-match metric."
+        ),
+    )
     parser.add_argument(
         "--qual-sampling-steps",
         type=int,
-        default=None,
+        default=16,
         help=(
-            "Diffusion denoising steps for qualitative sample logging. "
-            "Defaults to the selected model family's reference sampler."
+            "Diffusion denoising steps for qualitative logging and subset exact-match "
+            "eval."
         ),
     )
     parser.add_argument(
@@ -235,6 +249,7 @@ def main() -> None:
         wandb_project=args.wandb_project,
         wandb_run_name=args.wandb_run_name,
         qual_num_samples_per_split=args.qual_num_samples_per_split,
+        subset_eval_num_samples=args.subset_eval_num_samples,
         qual_sampling_steps=args.qual_sampling_steps,
         full_exact_match_eval=args.full_exact_match_eval,
         max_train_examples=args.max_train_examples,
