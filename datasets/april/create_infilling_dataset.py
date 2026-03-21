@@ -35,9 +35,10 @@ EXTRACT_DATA_PATH = (
     REPO_ROOT / "lean_dojo_v2" / "lean_dojo" / "data_extraction" / "ExtractData.lean"
 )
 DEFAULT_PROJECT_PATH = APRIL_DIR / "april_eval_project"
-# APRIL has pre-split train/val manifests in materialized/{train,val}/
+# APRIL has pre-split train/val/test manifests in materialized/{train,val,test}/
 DEFAULT_TRAIN_MANIFEST_PATH = APRIL_DIR / "materialized" / "train" / "thme_train.manifest.jsonl"
 DEFAULT_VAL_MANIFEST_PATH = APRIL_DIR / "materialized" / "val" / "thme_val.manifest.jsonl"
+DEFAULT_TEST_MANIFEST_PATH = APRIL_DIR / "materialized" / "test" / "thme_test.manifest.jsonl"
 DEFAULT_OUTPUT_JSON = APRIL_DIR / "leandojo_infilling" / "thme.jsonl"
 HOLE_TOKEN = "<HOLE>"
 
@@ -78,6 +79,11 @@ def make_temp_output_path(path: Path) -> Path:
 def validate_optional_positive(name: str, value: int | None) -> None:
     if value is not None and value <= 0:
         raise ValueError(f"{name} must be positive when provided.")
+
+
+def validate_optional_nonnegative(name: str, value: int | None) -> None:
+    if value is not None and value < 0:
+        raise ValueError(f"{name} must be non-negative when provided.")
 
 
 def load_manifest(manifest_path: Path) -> list[dict[str, Any]]:
@@ -723,15 +729,26 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--test-manifest-path",
+        type=Path,
+        default=None,
+        help=(
+            "Optional path to separate test manifest input. Accepts either "
+            "a JSONL file or a directory containing *.manifest.jsonl files. "
+            "If provided, creates an infilling test dataset in addition to train/val. "
+            f"(default: {DEFAULT_TEST_MANIFEST_PATH})"
+        ),
+    )
+    parser.add_argument(
         "--output-json",
         "--output-path",
         type=Path,
         default=DEFAULT_OUTPUT_JSON,
         dest="output_json",
         help=(
-            "Base output dataset path. If --val-ratio > 0, writes "
-            "<stem>.train<suffix> and <stem>.val<suffix>; otherwise writes "
-            "the full dataset to this path "
+            "Base output dataset path. If any separate val/test split is emitted, writes "
+            "<stem>.train<suffix>, <stem>.val<suffix>, and/or <stem>.test<suffix>; "
+            "otherwise writes the full dataset to this path "
             f"(default: {DEFAULT_OUTPUT_JSON})"
         ),
     )
@@ -758,13 +775,19 @@ def main() -> None:
         "--max-train-examples",
         type=int,
         default=None,
-        help="Maximum number of train examples to emit (default: all)",
+        help="Maximum number of train examples to emit; 0 skips train (default: all)",
     )
     parser.add_argument(
         "--max-val-examples",
         type=int,
         default=None,
-        help="Maximum number of validation examples to emit (default: all)",
+        help="Maximum number of validation examples to emit; 0 skips val (default: all)",
+    )
+    parser.add_argument(
+        "--max-test-examples",
+        type=int,
+        default=None,
+        help="Maximum number of test examples to emit; 0 skips test (default: all)",
     )
     parser.add_argument(
         "--extract-timeout",
@@ -827,14 +850,17 @@ def main() -> None:
     args = parser.parse_args()
     validate_optional_positive("--max-theorems", args.max_theorems)
     validate_optional_positive("--max-examples-per-theorem", args.max_examples_per_theorem)
-    validate_optional_positive("--max-train-examples", args.max_train_examples)
-    validate_optional_positive("--max-val-examples", args.max_val_examples)
+    validate_optional_nonnegative("--max-train-examples", args.max_train_examples)
+    validate_optional_nonnegative("--max-val-examples", args.max_val_examples)
+    validate_optional_nonnegative("--max-test-examples", args.max_test_examples)
 
     # Handle val_manifest_path default if not provided
     if args.val_manifest_path is None and args.val_ratio <= 0:
         # If no val split requested and no explicit val manifest, use default
         if DEFAULT_VAL_MANIFEST_PATH.exists():
             args.val_manifest_path = DEFAULT_VAL_MANIFEST_PATH
+    if args.test_manifest_path is None and DEFAULT_TEST_MANIFEST_PATH.exists():
+        args.test_manifest_path = DEFAULT_TEST_MANIFEST_PATH
 
     configure_elan_toolchain(args.project_path)
     if not args.project_path.is_dir():
@@ -849,6 +875,9 @@ def main() -> None:
         max_examples: int | None = None,
     ) -> tuple[int, list[dict[str, Any]], Counter[str]]:
         """Process one manifest and stream example batches to callback."""
+        if max_examples == 0:
+            return 0, [], Counter()
+
         manifest = load_manifest(manifest_path)
 
         if args.max_theorems is not None:
@@ -966,41 +995,54 @@ def main() -> None:
 
     # Determine output paths.
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
-    train_path: Path
+    train_path: Path | None = None
     val_path: Path | None = None
-    if args.val_manifest_path is not None and args.val_ratio <= 0:
+    test_path: Path | None = None
+    train_enabled = args.max_train_examples != 0
+    val_manifest_enabled = (
+        args.val_manifest_path is not None and args.max_val_examples != 0
+    )
+    use_ratio_split = args.val_ratio > 0 and args.max_val_examples != 0 and train_enabled
+    val_enabled = val_manifest_enabled or use_ratio_split
+    test_enabled = args.test_manifest_path is not None and args.max_test_examples != 0
+    has_extra_split_outputs = val_enabled or test_enabled
+    if train_enabled and has_extra_split_outputs:
         train_path = args.output_json.with_name(
             f"{args.output_json.stem}.train{args.output_json.suffix}"
         )
-        val_path = args.output_json.with_name(
-            f"{args.output_json.stem}.val{args.output_json.suffix}"
-        )
-    elif args.val_ratio > 0:
-        train_path = args.output_json.with_name(
-            f"{args.output_json.stem}.train{args.output_json.suffix}"
-        )
-        val_path = args.output_json.with_name(
-            f"{args.output_json.stem}.val{args.output_json.suffix}"
-        )
-    else:
+    elif train_enabled:
         train_path = args.output_json
+    if val_enabled:
+        val_path = args.output_json.with_name(
+            f"{args.output_json.stem}.val{args.output_json.suffix}"
+        )
+    if test_enabled:
+        test_path = args.output_json.with_name(
+            f"{args.output_json.stem}.test{args.output_json.suffix}"
+        )
 
     train_examples: list[dict[str, Any]] = []
     val_examples: list[dict[str, Any]] = []
+    test_examples: list[dict[str, Any]] = []
     train_failures: list[dict[str, Any]] = []
     val_failures: list[dict[str, Any]] = []
+    test_failures: list[dict[str, Any]] = []
     train_reasons: Counter[str] = Counter()
     val_reasons: Counter[str] = Counter()
+    test_reasons: Counter[str] = Counter()
     unique_theorems: set[tuple[str, str]] = set()
     train_example_count = 0
     val_example_count = 0
+    test_example_count = 0
 
     train_writer = None
     val_writer = None
+    test_writer = None
     theorem_split: dict[tuple[str, str], str] = {}
     split_rng = random.Random(args.seed)
-    train_temp_path = make_temp_output_path(train_path)
+    train_temp_path = make_temp_output_path(train_path) if train_path is not None else None
     val_temp_path = make_temp_output_path(val_path) if val_path is not None else None
+    test_temp_path = make_temp_output_path(test_path) if test_path is not None else None
     finalized_outputs = False
 
     def collect_theorems(examples: list[dict[str, Any]]) -> None:
@@ -1009,37 +1051,57 @@ def main() -> None:
             unique_theorems.add(key)
 
     def write_jsonl_batch(examples: list[dict[str, Any]], split: str) -> None:
-        nonlocal train_example_count, val_example_count
+        nonlocal train_example_count, val_example_count, test_example_count
         if not examples:
             return
         collect_theorems(examples)
-        writer = train_writer if split == "train" else val_writer
+        if split == "train":
+            writer = train_writer
+        elif split == "val":
+            writer = val_writer
+        elif split == "test":
+            writer = test_writer
+        else:
+            raise RuntimeError(f"Unknown split '{split}'.")
         if writer is None:
             raise RuntimeError(f"Writer for split '{split}' is not open.")
         for ex in examples:
             writer.write(json.dumps(ex, ensure_ascii=False) + "\n")
         if split == "train":
             train_example_count += len(examples)
-        else:
+        elif split == "val":
             val_example_count += len(examples)
+        else:
+            test_example_count += len(examples)
 
     def collect_json_batch(examples: list[dict[str, Any]], split: str) -> None:
+        nonlocal train_example_count, val_example_count, test_example_count
         if not examples:
             return
         collect_theorems(examples)
         if split == "train":
             train_examples.extend(examples)
-        else:
+            train_example_count += len(examples)
+        elif split == "val":
             val_examples.extend(examples)
+            val_example_count += len(examples)
+        elif split == "test":
+            test_examples.extend(examples)
+            test_example_count += len(examples)
+        else:
+            raise RuntimeError(f"Unknown split '{split}'.")
 
     try:
         if args.output_format == "jsonl":
-            train_writer = train_temp_path.open("w", encoding="utf-8")
+            if train_temp_path is not None:
+                train_writer = train_temp_path.open("w", encoding="utf-8")
             if val_temp_path is not None:
                 val_writer = val_temp_path.open("w", encoding="utf-8")
+            if test_temp_path is not None:
+                test_writer = test_temp_path.open("w", encoding="utf-8")
 
         if args.output_format == "jsonl":
-            if args.val_ratio > 0:
+            if use_ratio_split:
 
                 def on_train_examples(examples: list[dict[str, Any]]) -> None:
                     split_train_batch: list[dict[str, Any]] = []
@@ -1064,6 +1126,9 @@ def main() -> None:
 
             def on_val_examples(examples: list[dict[str, Any]]) -> None:
                 write_jsonl_batch(examples, "val")
+
+            def on_test_examples(examples: list[dict[str, Any]]) -> None:
+                write_jsonl_batch(examples, "test")
         else:
 
             def on_train_examples(examples: list[dict[str, Any]]) -> None:
@@ -1072,30 +1137,36 @@ def main() -> None:
             def on_val_examples(examples: list[dict[str, Any]]) -> None:
                 collect_json_batch(examples, "val")
 
+            def on_test_examples(examples: list[dict[str, Any]]) -> None:
+                collect_json_batch(examples, "test")
+
         # Resolve train manifests (single file or directory of manifests)
-        train_manifest_paths = resolve_manifest_paths(args.train_manifest_path, "train")
-        print(
-            f"[train] Using {len(train_manifest_paths)} manifest(s) from "
-            f"{args.train_manifest_path}"
-        )
-        for manifest_path in train_manifest_paths:
-            print(f"[train] Loading manifest from {manifest_path}")
-            _, failures, reasons = process_manifest(
-                manifest_path,
-                f"Processing train manifest ({manifest_path.name})",
-                on_train_examples,
-                max_examples=args.max_train_examples,
+        if train_enabled:
+            train_manifest_paths = resolve_manifest_paths(args.train_manifest_path, "train")
+            print(
+                f"[train] Using {len(train_manifest_paths)} manifest(s) from "
+                f"{args.train_manifest_path}"
             )
-            train_failures.extend(failures)
-            train_reasons += reasons
-            if (
-                args.max_train_examples is not None
-                and train_example_count >= args.max_train_examples
-            ):
-                break
+            for manifest_path in train_manifest_paths:
+                print(f"[train] Loading manifest from {manifest_path}")
+                _, failures, reasons = process_manifest(
+                    manifest_path,
+                    f"Processing train manifest ({manifest_path.name})",
+                    on_train_examples,
+                    max_examples=args.max_train_examples,
+                )
+                train_failures.extend(failures)
+                train_reasons += reasons
+                if (
+                    args.max_train_examples is not None
+                    and train_example_count >= args.max_train_examples
+                ):
+                    break
+        elif args.max_train_examples == 0:
+            print("[train] Skipping split because --max-train-examples=0")
 
         # Process val manifest if provided (separate from val-ratio split)
-        if args.val_manifest_path is not None:
+        if val_manifest_enabled:
             val_manifest_paths = resolve_manifest_paths(args.val_manifest_path, "val")
             print(
                 f"[val] Using {len(val_manifest_paths)} manifest(s) from "
@@ -1116,25 +1187,36 @@ def main() -> None:
                     and val_example_count >= args.max_val_examples
                 ):
                     break
+        elif args.val_manifest_path is not None and args.max_val_examples == 0:
+            print("[val] Skipping split because --max-val-examples=0")
+        elif args.val_ratio > 0 and args.max_val_examples == 0:
+            print("[val] Skipping ratio split because --max-val-examples=0")
+
+        if test_enabled:
+            test_manifest_paths = resolve_manifest_paths(args.test_manifest_path, "test")
+            print(
+                f"[test] Using {len(test_manifest_paths)} manifest(s) from "
+                f"{args.test_manifest_path}"
+            )
+            for manifest_path in test_manifest_paths:
+                print(f"[test] Loading manifest from {manifest_path}")
+                _, failures, reasons = process_manifest(
+                    manifest_path,
+                    f"Processing test manifest ({manifest_path.name})",
+                    on_test_examples,
+                    max_examples=args.max_test_examples,
+                )
+                test_failures.extend(failures)
+                test_reasons += reasons
+                if (
+                    args.max_test_examples is not None
+                    and test_example_count >= args.max_test_examples
+                ):
+                    break
+        elif args.test_manifest_path is not None and args.max_test_examples == 0:
+            print("[test] Skipping split because --max-test-examples=0")
         if args.output_format == "json":
-            if args.val_manifest_path is not None and args.val_ratio <= 0:
-                # Separate train/val manifests were provided - write them separately.
-                train_examples.sort(
-                    key=lambda ex: (ex["file_path"], ex["infilling"]["hole_index"])
-                )
-                val_examples.sort(
-                    key=lambda ex: (ex["file_path"], ex["infilling"]["hole_index"])
-                )
-                train_temp_path.write_text(
-                    json.dumps(train_examples, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
-                if val_temp_path is not None:
-                    val_temp_path.write_text(
-                        json.dumps(val_examples, ensure_ascii=False, indent=2),
-                        encoding="utf-8",
-                    )
-            elif args.val_ratio > 0:
+            if use_ratio_split:
                 # Split train examples using val_ratio at theorem level.
                 split_train, split_val = split_examples_train_val(
                     train_examples, args.val_ratio, args.seed
@@ -1147,32 +1229,70 @@ def main() -> None:
                 )
                 train_examples = split_train
                 val_examples = split_val
-                train_temp_path.write_text(
-                    json.dumps(train_examples, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
+                if train_temp_path is not None:
+                    train_temp_path.write_text(
+                        json.dumps(train_examples, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
                 if val_temp_path is not None:
                     val_temp_path.write_text(
                         json.dumps(val_examples, ensure_ascii=False, indent=2),
                         encoding="utf-8",
                     )
+                if test_temp_path is not None:
+                    test_examples.sort(
+                        key=lambda ex: (ex["file_path"], ex["infilling"]["hole_index"])
+                    )
+                    test_temp_path.write_text(
+                        json.dumps(test_examples, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+            elif val_manifest_enabled or test_enabled:
+                # Separate train/val/test manifests were provided - write them separately.
+                train_examples.sort(
+                    key=lambda ex: (ex["file_path"], ex["infilling"]["hole_index"])
+                )
+                val_examples.sort(
+                    key=lambda ex: (ex["file_path"], ex["infilling"]["hole_index"])
+                )
+                test_examples.sort(
+                    key=lambda ex: (ex["file_path"], ex["infilling"]["hole_index"])
+                )
+                if train_temp_path is not None:
+                    train_temp_path.write_text(
+                        json.dumps(train_examples, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                if val_temp_path is not None:
+                    val_temp_path.write_text(
+                        json.dumps(val_examples, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                if test_temp_path is not None:
+                    test_temp_path.write_text(
+                        json.dumps(test_examples, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
             else:
                 # No val split - write all to single file.
-                all_examples = train_examples + val_examples
+                all_examples = train_examples + val_examples + test_examples
                 all_examples.sort(
                     key=lambda ex: (ex["file_path"], ex["infilling"]["hole_index"])
                 )
                 train_examples = all_examples
                 val_examples = []
-                train_temp_path.write_text(
-                    json.dumps(train_examples, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
+                test_examples = []
+                if train_temp_path is not None:
+                    train_temp_path.write_text(
+                        json.dumps(train_examples, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
             train_example_count = len(train_examples)
             val_example_count = len(val_examples)
+            test_example_count = len(test_examples)
 
-        failure_rows = train_failures + val_failures
-        failure_reasons = train_reasons + val_reasons
+        failure_rows = train_failures + val_failures + test_failures
+        failure_reasons = train_reasons + val_reasons + test_reasons
         failure_rows.sort(key=lambda rec: rec["row_idx"])
 
         if args.failure_log is not None:
@@ -1187,32 +1307,47 @@ def main() -> None:
         if val_writer is not None:
             val_writer.close()
             val_writer = None
+        if test_writer is not None:
+            test_writer.close()
+            test_writer = None
 
-        train_temp_path.replace(train_path)
+        if train_temp_path is not None and train_path is not None:
+            train_temp_path.replace(train_path)
         if val_temp_path is not None and val_path is not None:
             val_temp_path.replace(val_path)
+        if test_temp_path is not None and test_path is not None:
+            test_temp_path.replace(test_path)
         finalized_outputs = True
     finally:
         if train_writer is not None:
             train_writer.close()
         if val_writer is not None:
             val_writer.close()
+        if test_writer is not None:
+            test_writer.close()
         if not finalized_outputs:
-            if train_temp_path.exists():
+            if train_temp_path is not None and train_temp_path.exists():
                 train_temp_path.unlink()
             if val_temp_path is not None and val_temp_path.exists():
                 val_temp_path.unlink()
+            if test_temp_path is not None and test_temp_path.exists():
+                test_temp_path.unlink()
 
-    total_examples = train_example_count + val_example_count
+    total_examples = train_example_count + val_example_count + test_example_count
     num_theorems = len(unique_theorems)
     num_failed = len(failure_rows)
 
-    print(
-        f"[train] Processed {train_example_count} examples, {len(train_failures)} failures"
-    )
-    if args.val_manifest_path is not None or args.val_ratio > 0:
+    if train_enabled:
+        print(
+            f"[train] Processed {train_example_count} examples, {len(train_failures)} failures"
+        )
+    if val_enabled:
         print(
             f"[val] Processed {val_example_count} examples, {len(val_failures)} failures"
+        )
+    if test_enabled:
+        print(
+            f"[test] Processed {test_example_count} examples, {len(test_failures)} failures"
         )
 
     print(f"\nSummary:")
@@ -1220,13 +1355,17 @@ def main() -> None:
     print(f"  Unique theorems: {num_theorems}")
     print(f"  Failed files: {num_failed}")
 
-    if val_path is not None:
+    if train_path is not None:
         print(f"  Train examples: {train_example_count}")
-        print(f"  Val examples: {val_example_count}")
         print(f"  Wrote train: {train_path}")
+    if val_path is not None:
+        print(f"  Val examples: {val_example_count}")
         print(f"  Wrote val: {val_path}")
-    else:
-        print(f"  Wrote: {train_path}")
+    if test_path is not None:
+        print(f"  Test examples: {test_example_count}")
+        print(f"  Wrote test: {test_path}")
+    if train_path is None and val_path is None and test_path is None:
+        print("  Wrote: no output files")
 
     if failure_reasons:
         print("\nFailure reasons:")

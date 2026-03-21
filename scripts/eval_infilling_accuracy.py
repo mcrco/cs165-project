@@ -37,7 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--dataset-path",
-        default="datasets/april/leandojo_infilling/thme_1m_100k.val.jsonl",
+        default="datasets/april/leandojo_infilling/thme.test.jsonl",
         help=(
             "Validation dataset path (JSON or JSONL). If missing, the script tries "
             "common APRIL validation locations."
