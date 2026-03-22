@@ -61,6 +61,34 @@ def _is_main_process() -> bool:
     return True
 
 
+def _distributed_rank() -> int:
+    rank = os.getenv("RANK")
+    if rank is not None:
+        try:
+            return int(rank)
+        except ValueError:
+            pass
+
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        return torch.distributed.get_rank()
+
+    return 0
+
+
+def _world_size() -> int:
+    world_size = os.getenv("WORLD_SIZE")
+    if world_size is not None:
+        try:
+            return int(world_size)
+        except ValueError:
+            pass
+
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        return torch.distributed.get_world_size()
+
+    return 1
+
+
 def _build_ar_infilling_prompt_prefix(
     tokenizer,
     theorem_statement: str,
@@ -796,6 +824,19 @@ class InfillingAutoregressiveTrainer:
         model.print_trainable_parameters()
         return model
 
+    def _ensure_lora_trainable(self) -> int:
+        if not self.use_lora:
+            return sum(1 for param in self.model.parameters() if param.requires_grad)
+
+        trainable_tensors = 0
+        for name, param in self.model.named_parameters():
+            should_train = "lora_" in name
+            if param.requires_grad != should_train:
+                param.requires_grad = should_train
+            if should_train:
+                trainable_tensors += 1
+        return trainable_tensors
+
     def _load_dataset(self, data_path: str, max_examples: Optional[int] = None) -> Dataset:
         dataset = InfillingARDataset(
             data_path=data_path,
@@ -937,6 +978,12 @@ class InfillingAutoregressiveTrainer:
         trainer.remove_callback(PrinterCallback)
         trainer.remove_callback(ProgressCallback)
         trainer.add_callback(QuietProgressCallback())
+        trainable_tensors = self._ensure_lora_trainable()
+        if _world_size() > 1:
+            print(
+                f"[rank {_distributed_rank()}] trainable parameter tensors before DDP wrap: "
+                f"{trainable_tensors}"
+            )
 
         try:
             print("Starting training...")
